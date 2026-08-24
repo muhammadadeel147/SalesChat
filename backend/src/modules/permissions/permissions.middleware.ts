@@ -144,7 +144,7 @@ export function requireFeature(...features: FeatureKey[]): RequestHandler {
     const allowed = features.some((f) => userHasFeature(liveFeatures, f));
     if (!allowed) {
       throw new ForbiddenError(
-        'This feature requires a plan upgrade. Contact Raunaq to unlock it.',
+        'This feature requires a plan upgrade. Contact SaleChat to unlock it.',
         'UPGRADE_REQUIRED',
       );
     }

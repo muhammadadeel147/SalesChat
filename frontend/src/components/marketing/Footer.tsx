@@ -17,22 +17,44 @@ const companyLinks = [
 
 export function Footer() {
   return (
-    <footer className="relative z-20 w-full bg-gradient-to-b from-[#bc6b32] to-[#8a4a1c] py-8 text-pure-white sm:py-9">
+    <footer className="relative z-20 w-full bg-gradient-to-b from-[#059669] to-[#065f46] py-8 text-pure-white sm:py-9">
       <div className="site-shell">
         <div className="mb-6 grid grid-cols-1 gap-6 sm:grid-cols-2 sm:gap-8 lg:grid-cols-3 lg:gap-10">
           <div>
             <Logo light />
             <p className="mt-3 text-body-sm text-primary-container/85">{BRAND.productBy}</p>
+            <p className="mt-3 text-body-sm text-primary-container/85">
+              <a href={`mailto:${BRAND.email}`} className="hover:text-pure-white">
+                {BRAND.email}
+              </a>
+              <span className="mx-2 opacity-50">·</span>
+              <a href={`tel:${BRAND.phone.replace(/\s/g, '')}`} className="hover:text-pure-white">
+                {BRAND.phone}
+              </a>
+            </p>
             <div className="mt-3 flex gap-2.5">
-              <span className="chip-on-brown inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-full">
-                <MaterialIcon name="share" className="text-[16px]" />
-              </span>
-              <span className="chip-on-brown inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-full">
+              <a
+                href={BRAND.whatsappUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="chip-on-brown inline-flex h-8 w-8 items-center justify-center rounded-full"
+                aria-label="WhatsApp"
+              >
+                <MaterialIcon name="chat" className="text-[16px]" />
+              </a>
+              <a
+                href={BRAND.companyUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="chip-on-brown inline-flex h-8 w-8 items-center justify-center rounded-full"
+                aria-label="Website"
+              >
                 <MaterialIcon name="language" className="text-[16px]" />
-              </span>
+              </a>
               <a
                 href={`mailto:${BRAND.email}`}
                 className="chip-on-brown inline-flex h-8 w-8 items-center justify-center rounded-full"
+                aria-label="Email"
               >
                 <MaterialIcon name="mail" className="text-[16px]" />
               </a>

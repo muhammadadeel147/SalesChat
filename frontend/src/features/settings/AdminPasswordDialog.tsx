@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 
-import { RaunaqLogo } from '@/components/brand/RaunaqLogo';
+import { SaleChatLogo } from '@/components/brand/SaleChatLogo';
 import { IconKey } from '@/components/icons';
 import { Button } from '@/components/ui/Button';
 import { ChangePasswordForm } from '@/features/settings/ChangePasswordForm';
@@ -38,7 +38,7 @@ export function AdminPasswordDialog({ open, onClose }: AdminPasswordDialogProps)
       >
         <aside className="flex w-40 shrink-0 flex-col bg-sidebar text-text-inverse sm:w-44">
           <div className="border-b border-sidebar-border px-3 py-3">
-            <RaunaqLogo variant="compact" tone="dark" className="scale-90 origin-left" />
+            <SaleChatLogo variant="compact" tone="dark" className="scale-90 origin-left" />
             <p className="mt-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-brand-200/75">
               Settings
             </p>

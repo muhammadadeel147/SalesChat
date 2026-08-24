@@ -1,7 +1,7 @@
 /** Product branding — used in receipts, PDFs, and UI copy. */
 export const BRAND = {
-  name: 'Raunaq',
-  productName: 'Raunaq POS System',
+  name: 'SaleChat',
+  productName: 'SaleChat POS System',
   tagline: 'POS System',
   builtBy: 'NexMindSystems',
   /** Locked receipt footer — shops cannot remove this. */

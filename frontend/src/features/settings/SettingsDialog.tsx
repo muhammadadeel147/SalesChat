@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 
 import type { FC, SVGProps } from 'react';
 
-import { RaunaqLogo } from '@/components/brand/RaunaqLogo';
+import { SaleChatLogo } from '@/components/brand/SaleChatLogo';
 import {
   IconDownload,
   IconKey,
@@ -248,7 +248,7 @@ export function SettingsDialog({ open, tab, onTabChange, onClose }: SettingsDial
         {/* Left rail — desktop */}
         <aside className="hidden w-56 shrink-0 flex-col bg-sidebar text-text-inverse md:flex">
           <div className="border-b border-sidebar-border px-3 py-3.5">
-            <RaunaqLogo variant="compact" tone="dark" className="scale-90 origin-left" />
+            <SaleChatLogo variant="compact" tone="dark" className="scale-90 origin-left" />
             <p className="mt-2.5 px-0.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-brand-200/75">
               Settings
             </p>

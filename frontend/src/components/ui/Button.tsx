@@ -1,4 +1,8 @@
+'use client';
+
 import type { ButtonHTMLAttributes, ReactNode } from 'react';
+
+import { Link } from '@/lib/next-nav';
 
 const variants = {
   primary:
@@ -22,6 +26,8 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   size?: keyof typeof sizes;
   loading?: boolean;
   children: ReactNode;
+  /** Renders an anchor instead of a button so it is safe to use as navigation. */
+  href?: string;
 }
 
 export function Button({
@@ -31,19 +37,30 @@ export function Button({
   disabled,
   className = '',
   children,
+  href,
   ...props
 }: ButtonProps) {
-  return (
-    <button
-      type="button"
-      disabled={disabled || loading}
-      className={`inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-xl font-medium transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-50 ${variants[variant]} ${sizes[size]} ${className}`}
-      {...props}
-    >
+  const classes = `inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-xl font-medium transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-50 ${variants[variant]} ${sizes[size]} ${className}`;
+  const content = (
+    <>
       {loading && (
         <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
       )}
       {children}
+    </>
+  );
+
+  if (href) {
+    return (
+      <Link to={href} className={classes} title={props.title}>
+        {content}
+      </Link>
+    );
+  }
+
+  return (
+    <button type="button" disabled={disabled || loading} className={classes} {...props}>
+      {content}
     </button>
   );
 }

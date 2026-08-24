@@ -7,7 +7,6 @@ import { NavLink } from '@/lib/next-nav';
 import { IconChart, IconClose, IconDashboard, IconMenu, IconUsers } from '@/components/icons';
 import { AccountMenu } from '@/components/layout/AccountMenu';
 import { SidebarHeader } from '@/components/layout/SidebarHeader';
-import { RaunaqMark } from '@/components/brand/RaunaqMark';
 import { AdminPasswordDialogProvider } from '@/features/settings/admin-password-dialog-context';
 import { useSidebarCollapsed } from '@/lib/use-sidebar-collapsed';
 
@@ -107,9 +106,10 @@ export function AdminAppShell({ children }: { children: ReactNode }) {
             />
             <aside className="sidebar-shell absolute inset-y-0 left-0 flex w-[min(18rem,88vw)] flex-col bg-sidebar font-sans antialiased text-text-inverse shadow-2xl">
               <div className="flex items-center justify-between border-b border-sidebar-border px-3 py-3">
-                <div className="flex items-center gap-2">
-                  <RaunaqMark size={28} tone="dark" />
-                  <span className="text-sm font-semibold text-white">Admin</span>
+                <div className="flex min-w-0 items-center">
+                  <span className="truncate text-sm font-extrabold tracking-tight text-white">
+                    SaleChat
+                  </span>
                 </div>
                 <button
                   type="button"

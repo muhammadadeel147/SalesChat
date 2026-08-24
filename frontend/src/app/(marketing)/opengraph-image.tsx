@@ -26,7 +26,7 @@ export default function OpenGraphImage() {
             width: 56,
             height: 56,
             borderRadius: 10,
-            background: '#BC6B32',
+            background: '#059669',
             color: 'white',
             display: 'flex',
             alignItems: 'center',
@@ -37,7 +37,7 @@ export default function OpenGraphImage() {
         >
           S
         </div>
-        <div style={{ fontSize: 36, fontWeight: 700, color: '#BC6B32' }}>{BRAND.name}</div>
+        <div style={{ fontSize: 36, fontWeight: 700, color: '#059669' }}>{BRAND.name}</div>
       </div>
       <div style={{ fontSize: 58, fontWeight: 700, lineHeight: 1.12, maxWidth: 920 }}>
         Cloud POS, ERP, RMS & HMS

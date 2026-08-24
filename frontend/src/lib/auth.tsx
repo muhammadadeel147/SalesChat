@@ -58,14 +58,10 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(() => {
-    if (typeof localStorage === 'undefined') return null;
-    if (!hasSessionFlag()) return null;
-    return readCachedUser();
-  });
-  const [isLoading, setIsLoading] = useState(false);
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
   const [branches, setBranches] = useState<Branch[]>([]);
-  const [branchId, setBranchIdState] = useState<string | null>(getStoredBranchId());
+  const [branchId, setBranchIdState] = useState<string | null>(null);
 
   const applyUser = useCallback((next: AuthUser | null) => {
     setUser(next);
@@ -122,6 +118,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setIsLoading(false);
         return;
       }
+      const cached = readCachedUser();
+      if (cached) applyUser(cached);
+      setBranchIdState(getStoredBranchId());
       setIsLoading(false);
       await refreshUser();
     })();

@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { useNavigate } from '@/lib/next-nav';
 import { BRAND } from '@/lib/shared';
 
-import { RaunaqLogo } from '@/components/brand/RaunaqLogo';
+import { SaleChatLogo } from '@/components/brand/SaleChatLogo';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { ApiError } from '@/lib/api-client';
@@ -72,15 +72,15 @@ export function LoginPage() {
 
   const payWhatsApp = supportWhatsappUrl(
     accessGate?.kind === 'trial'
-      ? `Hi, my Raunaq POS trial has ended. I'd like to convert to a paid plan.\nEmail: ${email || '(add login email)'}`
-      : `Hi, my Raunaq POS subscription has ended. I'd like to pay and continue using the product.\nEmail: ${email || '(add login email)'}`,
+      ? `Hi, my SaleChat POS trial has ended. I'd like to convert to a paid plan.\nEmail: ${email || '(add login email)'}`
+      : `Hi, my SaleChat POS subscription has ended. I'd like to pay and continue using the product.\nEmail: ${email || '(add login email)'}`,
   );
 
   return (
     <div className="flex min-h-screen">
       <div className="hidden flex-1 flex-col justify-between bg-gradient-to-br from-sidebar via-brand-800 to-brand-900 p-12 text-white lg:flex">
         <div>
-          <RaunaqLogo variant="full" tone="dark" />
+          <SaleChatLogo variant="full" tone="dark" />
           <p className="mt-8 max-w-md text-lg text-brand-100/90">
             Fast billing, inventory, and udhaar management built for Pakistani shops.
           </p>
@@ -102,7 +102,7 @@ export function LoginPage() {
       <div className="flex flex-1 items-center justify-center p-6">
         <div className="w-full max-w-md">
           <div className="mb-8 flex flex-col items-center lg:hidden">
-            <RaunaqLogo variant="full" tone="light" className="h-40 max-w-[240px]" />
+            <SaleChatLogo variant="full" tone="light" className="h-40 max-w-[240px]" />
             <p className="mt-3 text-sm text-text-muted">Sign in to {BRAND.name}</p>
           </div>
 
@@ -114,7 +114,7 @@ export function LoginPage() {
                 </h2>
                 <p className="text-sm leading-relaxed text-text-muted">
                   {accessGate.kind === 'trial'
-                    ? 'Your free trial is over. Convert to a paid plan to keep using Raunaq POS.'
+                    ? 'Your free trial is over. Convert to a paid plan to keep using SaleChat POS.'
                     : 'Your payment period has ended. Pay to continue using the product — access stays locked until renewal.'}
                 </p>
                 <div className="rounded-xl border border-brand-200 bg-brand-50/80 px-4 py-4 text-left text-sm text-brand-950">
@@ -166,7 +166,7 @@ export function LoginPage() {
                     WhatsApp{' '}
                     <a
                       className="font-medium text-brand-800 underline"
-                      href={supportWhatsappUrl('Hi, my Raunaq POS access was blocked.')}
+                      href={supportWhatsappUrl('Hi, my SaleChat POS access was blocked.')}
                       target="_blank"
                       rel="noreferrer"
                     >

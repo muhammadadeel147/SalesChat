@@ -44,8 +44,8 @@ export function UpgradePlansPage() {
     const url = supportWhatsappUrl(
       [
         intent === 'switch_cycle'
-          ? `Hi, I'd like to switch my Raunaq POS billing to ${billingCycleLabel(cycle)} on the ${plan.name} plan.`
-          : `Hi, I'd like to upgrade my Raunaq POS plan to ${plan.name} (${billingCycleLabel(cycle)}).`,
+          ? `Hi, I'd like to switch my SaleChat POS billing to ${billingCycleLabel(cycle)} on the ${plan.name} plan.`
+          : `Hi, I'd like to upgrade my SaleChat POS plan to ${plan.name} (${billingCycleLabel(cycle)}).`,
         `Selected plan: ${plan.name}`,
         `Billing cycle: ${billingCycleLabel(cycle)}`,
         `Price: ${formatPkr(price)}/${period}${plan.priceSuffix ? ` (${plan.priceSuffix})` : ''}`,

@@ -165,7 +165,7 @@ export function PainPointsInteractive() {
               className={`group relative flex items-center gap-2 overflow-hidden rounded-full border-2 px-6 py-3 text-body-md font-semibold transition-all sm:px-8 sm:py-3.5 ${
                 transformed
                   ? 'border-dashed border-primary bg-pure-white text-primary hover:bg-primary hover:text-on-primary'
-                  : 'border-transparent bg-primary text-on-primary shadow-lg hover:bg-[#a75a28] hover:shadow-xl'
+                  : 'border-transparent bg-primary text-on-primary shadow-lg hover:bg-[#047857] hover:shadow-xl'
               }`}
             >
               {!transformed ? (

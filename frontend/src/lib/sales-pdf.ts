@@ -70,11 +70,11 @@ export function buildSalesReportHtml(
   <style>
     ${printDocumentStyles()}
     @page { size: A4; margin: 14mm; }
-    .brand-logo { display: block; width: 140px; height: auto; margin: 0 0 12px; }
+    .brand-name { font-size: 20px; font-weight: 800; letter-spacing: -0.02em; color: #047857; margin: 0 0 12px; }
   </style>
 </head>
 <body>
-  <img class="brand-logo" src="${window.location.origin}/raunaq-logo-light.png" alt="${BRAND.productName}" />
+  <div class="brand-name">${BRAND.name}</div>
   <div class="doc-header">
     <div>
       <div class="doc-title">${businessName}</div>

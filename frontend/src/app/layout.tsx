@@ -28,11 +28,15 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: {
-    default: 'Raunaq POS',
-    template: '%s | Raunaq POS',
+    default: 'SaleChat — Cloud POS, ERP, RMS & HMS',
+    template: '%s | SaleChat',
   },
-  description: 'Raunaq POS — shop billing, inventory, and platform admin.',
-  icons: { icon: '/favicon.ico' },
+  description:
+    'SaleChat is cloud POS and ERP software for retail, restaurants (RMS), and hotels (HMS).',
+  icons: {
+    icon: [{ url: '/favicon.png', type: 'image/png' }],
+    apple: '/apple-icon.png',
+  },
 };
 
 export default function RootLayout({

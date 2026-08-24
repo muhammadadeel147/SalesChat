@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { APP_SIGNUP_URL } from '@/lib/constants';
+import { APP_TRIAL_URL } from '@/lib/constants';
 import { formatPkr, PRICING_PLANS, type BillingCycle } from '@/lib/pricing';
 import { Callout } from '../Callout';
 import { Reveal } from '../Reveal';
@@ -83,7 +83,7 @@ export function PricingSection({ showHeading = true }: { showHeading?: boolean }
                   <article
                     className={`flex h-full flex-col rounded-site p-5 text-center sm:p-6 ${
                       featured
-                        ? 'relative bg-gradient-to-br from-[#bc6b32] to-[#8a4a1c] text-pure-white shadow-lg'
+                        ? 'relative bg-gradient-to-br from-[#059669] to-[#065f46] text-pure-white shadow-lg'
                         : 'border-2 border-dashed border-primary/40 bg-surface-container shadow-sm'
                     }`}
                   >
@@ -131,10 +131,12 @@ export function PricingSection({ showHeading = true }: { showHeading?: boolean }
                       ))}
                     </ul>
                     <Button
-                      href={APP_SIGNUP_URL}
+                      href={APP_TRIAL_URL}
                       variant={featured ? 'onBrown' : 'primary'}
                       size="sm"
                       className="w-full font-bold"
+                      target="_blank"
+                      rel="noopener noreferrer"
                     >
                       Choose {plan.name}
                     </Button>

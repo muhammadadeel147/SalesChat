@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Link } from '@/lib/next-nav';
 
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -42,16 +41,12 @@ export function StockMovementsPage() {
         subtitle={`${rows.length} movement(s) in selected range`}
         action={
           <div className="flex flex-wrap gap-2">
-            <Link to="/pos/reports">
-              <Button variant="ghost" size="sm">
-                ← Reports
-              </Button>
-            </Link>
-            <Link to="/pos/inventory">
-              <Button variant="secondary" size="sm">
-                Inventory
-              </Button>
-            </Link>
+            <Button href="/pos/reports" variant="ghost" size="sm">
+              ← Reports
+            </Button>
+            <Button href="/pos/inventory" variant="secondary" size="sm">
+              Inventory
+            </Button>
           </div>
         }
       />

@@ -126,11 +126,10 @@ export function CategoriesPage() {
           {filtered.map((cat) => {
             const count = productCountByCategory.get(cat.id) ?? 0;
             return (
-              <button
+              <div
                 key={cat.id}
-                type="button"
                 onClick={() => setSelected(cat)}
-                className={`flex w-full items-center justify-between rounded-xl border p-4 text-left transition ${
+                className={`flex w-full cursor-pointer items-center justify-between rounded-xl border p-4 text-left transition ${
                   selected?.id === cat.id
                     ? 'border-brand-400 bg-brand-50 shadow-sm'
                     : 'border-border bg-surface hover:border-brand-200'
@@ -170,7 +169,7 @@ export function CategoriesPage() {
                     Del
                   </Button>
                 </div>
-              </button>
+              </div>
             );
           })}
           {filtered.length === 0 && (

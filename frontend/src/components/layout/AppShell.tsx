@@ -4,7 +4,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { usePathname } from 'next/navigation';
 import { NavLink } from '@/lib/next-nav';
 import type { FeatureKey } from '@/lib/shared';
-import { getTierFeaturePreset, type TenantTier } from '@/lib/shared';
+import { BRAND, getTierFeaturePreset, type TenantTier } from '@/lib/shared';
 
 import {
   IconBox,
@@ -30,7 +30,6 @@ import { SettingsDialogProvider } from '@/features/settings/settings-dialog-cont
 import { FEATURES, hasPlanFeature } from '@/lib/features';
 import { useAuth } from '@/lib/auth';
 import { useSidebarCollapsed } from '@/lib/use-sidebar-collapsed';
-import { RaunaqMark } from '@/components/brand/RaunaqMark';
 
 type NavItem = {
   to: string;
@@ -282,9 +281,10 @@ export function AppShell({ children }: { children: ReactNode }) {
             />
             <aside className="sidebar-shell absolute inset-y-0 left-0 flex w-[min(18rem,88vw)] flex-col bg-sidebar font-sans antialiased text-text-inverse shadow-2xl">
               <div className="flex items-center justify-between border-b border-sidebar-border px-3 py-3">
-                <div className="flex items-center gap-2">
-                  <RaunaqMark size={28} tone="dark" />
-                  <span className="text-sm font-semibold text-white">Menu</span>
+                <div className="flex min-w-0 items-center">
+                  <span className="truncate text-sm font-extrabold tracking-tight text-white">
+                    SaleChat
+                  </span>
                 </div>
                 <button
                   type="button"
@@ -316,7 +316,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               <IconMenu className="h-5 w-5" />
             </button>
             <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-bold text-text">Raunaq POS</p>
+              <p className="truncate text-sm font-bold text-text">{BRAND.productName}</p>
             </div>
             {branches.length > 1 && (
               <Select

@@ -408,7 +408,7 @@ export function ClientsPage() {
           </p>
           <p className="rounded-xl border border-brand-200 bg-brand-50/50 px-3 py-2 text-xs text-brand-900">
             Enter the <strong>client shop owner’s</strong> email and a temporary password — not your
-            Raunaq admin login. Share these with the shop so they can open the POS.
+            SaleChat admin login. Share these with the shop so they can open the POS.
           </p>
           <Input
             label="Owner full name"

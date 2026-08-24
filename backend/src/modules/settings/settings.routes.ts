@@ -43,7 +43,7 @@ export function createSettingsRouter(): Router {
 
       if (settingsPatchTouchesLayout(parsed.data) && !allowLayout) {
         throw new ForbiddenError(
-          'This feature requires a plan upgrade. Contact Raunaq to unlock it.',
+          'This feature requires a plan upgrade. Contact SaleChat to unlock it.',
           'UPGRADE_REQUIRED',
         );
       }

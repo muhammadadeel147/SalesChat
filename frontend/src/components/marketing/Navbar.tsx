@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { APP_LOGIN_URL, APP_SIGNUP_URL, NAV_LINKS } from '@/lib/constants';
+import { APP_LOGIN_URL, APP_TRIAL_URL, NAV_LINKS } from '@/lib/constants';
 import { Button } from './Button';
 import { Logo } from './Logo';
 import { MaterialIcon } from './MaterialIcon';
@@ -73,7 +73,7 @@ export function Navbar() {
   }, [open]);
 
   return (
-    <header className="fixed top-0 z-50 w-full bg-gradient-to-r from-[#bc6b32] to-[#8a4a1c] shadow-[var(--shadow-header)]">
+    <header className="fixed top-0 z-50 w-full bg-gradient-to-r from-[#059669] to-[#065f46] shadow-[var(--shadow-header)]">
       <div className="site-shell flex h-14 items-center justify-between gap-3 sm:h-16">
         <Logo showTagline light />
 
@@ -119,17 +119,19 @@ export function Navbar() {
         </nav>
 
         <div className="hidden items-center gap-3 lg:flex lg:gap-4">
-          <Link
+          <a
             href={APP_LOGIN_URL}
             className="font-caveat text-[1.25rem] font-semibold text-pure-white hover:text-primary-container lg:text-[1.35rem]"
           >
             Login
-          </Link>
+          </a>
           <Button
-            href={APP_SIGNUP_URL}
+            href={APP_TRIAL_URL}
             variant="onBrown"
             size="sm"
             className="px-4 font-caveat text-[1.2rem] font-bold lg:text-[1.3rem]"
+            target="_blank"
+            rel="noopener noreferrer"
           >
             Start Free Trial
           </Button>
@@ -157,7 +159,7 @@ export function Navbar() {
           />
           <div
             id="mobile-nav"
-            className="absolute left-0 right-0 top-full z-50 border-t border-pure-white/15 bg-[#8a4a1c] shadow-lg lg:hidden"
+            className="absolute left-0 right-0 top-full z-50 border-t border-pure-white/15 bg-[#065f46] shadow-lg lg:hidden"
           >
             <div className="site-shell flex flex-col gap-1 py-3">
               {NAV_LINKS.map((link) => {
@@ -178,17 +180,19 @@ export function Navbar() {
                 );
               })}
               <div className="mt-2 flex flex-col gap-2 border-t border-pure-white/15 pt-3">
-                <Link
+                <a
                   href={APP_LOGIN_URL}
                   className="font-caveat px-3 py-2 text-[1.3rem] font-semibold text-pure-white"
                 >
                   Login
-                </Link>
+                </a>
                 <Button
-                  href={APP_SIGNUP_URL}
+                  href={APP_TRIAL_URL}
                   variant="onBrown"
                   size="sm"
                   className="w-full font-caveat text-[1.25rem] font-bold"
+                  target="_blank"
+                  rel="noopener noreferrer"
                 >
                   Start Free Trial
                 </Button>

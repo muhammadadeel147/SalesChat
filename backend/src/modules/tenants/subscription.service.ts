@@ -167,8 +167,8 @@ export async function assertTenantPortalAccess(
     throwPortalBlocked(
       options,
       isTrial
-        ? 'Your trial has ended. Convert to a paid plan to continue using Raunaq POS.'
-        : 'Your subscription period has ended. Pay to continue using Raunaq POS.',
+        ? 'Your trial has ended. Convert to a paid plan to continue using SaleChat POS.'
+        : 'Your subscription period has ended. Pay to continue using SaleChat POS.',
       isTrial ? 'TENANT_TRIAL_EXPIRED' : 'TENANT_SUBSCRIPTION_EXPIRED',
       {
         reason: isTrial ? 'trial_expired' : 'subscription_expired',

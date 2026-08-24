@@ -57,7 +57,7 @@ export default function ContactPage() {
             </div>
 
             <aside className="flex flex-col gap-5 lg:col-span-5 lg:gap-6">
-              <div className="group relative overflow-hidden rounded-site bg-gradient-to-br from-[#bc6b32] to-[#8a4a1c] p-6 text-pure-white shadow-lg transition-transform duration-500 hover:scale-[1.01] sm:p-7">
+              <div className="group relative overflow-hidden rounded-site bg-gradient-to-br from-[#059669] to-[#065f46] p-6 text-pure-white shadow-lg transition-transform duration-500 hover:scale-[1.01] sm:p-7">
                 <h3 className="text-headline-md mb-5 flex items-center gap-2.5">
                   <MaterialIcon name="domain" className="text-primary-container" filled />
                   Contact {BRAND.company}
@@ -77,6 +77,17 @@ export default function ContactPage() {
                       className="transition-colors hover:text-pure-white"
                     >
                       {BRAND.phone}
+                    </a>
+                  </p>
+                  <p className="flex items-center gap-2.5">
+                    <MaterialIcon name="chat" className="text-[18px] text-primary-container" />
+                    <a
+                      href={BRAND.whatsappUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="transition-colors hover:text-pure-white"
+                    >
+                      WhatsApp {BRAND.whatsapp}
                     </a>
                   </p>
                   <p className="flex items-center gap-2.5">

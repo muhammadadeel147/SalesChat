@@ -113,11 +113,10 @@ export function BrandsPage() {
           {filtered.map((b) => {
             const count = productCountByBrand.get(b.id) ?? 0;
             return (
-              <button
+              <div
                 key={b.id}
-                type="button"
                 onClick={() => setSelected(b)}
-                className={`flex w-full items-center justify-between rounded-xl border p-4 text-left transition ${
+                className={`flex w-full cursor-pointer items-center justify-between rounded-xl border p-4 text-left transition ${
                   selected?.id === b.id
                     ? 'border-brand-400 bg-brand-50 shadow-sm'
                     : 'border-border bg-surface hover:border-brand-200'
@@ -152,7 +151,7 @@ export function BrandsPage() {
                     Del
                   </Button>
                 </div>
-              </button>
+              </div>
             );
           })}
           {filtered.length === 0 && (

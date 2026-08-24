@@ -53,4 +53,4 @@ Copy domain services and Prisma as-is. Rewrite only HTTP adapters (Fastify → E
 
 ## Branding
 
-Marketing site is currently SaleChat; POS receipts/UI are Raunaq. Port both as-is unless we unify later.
+Marketing site and POS UI are SaleChat (ported from the latest branding pull). Receipts still use `BRAND` from `frontend/src/lib/brand.ts` / `backend/src/constants/brand.ts`.

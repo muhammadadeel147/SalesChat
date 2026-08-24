@@ -77,7 +77,7 @@ export async function createSupportQuery(
   const contactEmail = input.contactEmail.trim().toLowerCase();
 
   const text = [
-    'New Raunaq POS help request',
+    'New SaleChat POS help request',
     '',
     `Query ID: ${row.id}`,
     `Created: ${createdAt}`,
@@ -102,7 +102,7 @@ export async function createSupportQuery(
 
   const html = `
     <div style="font-family: system-ui, sans-serif; line-height: 1.5; color: #0f2926;">
-      <h2 style="margin: 0 0 12px;">New Raunaq POS help request</h2>
+      <h2 style="margin: 0 0 12px;">New SaleChat POS help request</h2>
       <p style="margin: 0 0 8px;"><strong>Query ID:</strong> ${escapeHtml(row.id)}</p>
       <p style="margin: 0 0 8px;"><strong>Created:</strong> ${escapeHtml(createdAt)}</p>
       <p style="margin: 0 0 8px;"><strong>Topic:</strong> ${escapeHtml(topicLabel)} (${escapeHtml(input.topic)})</p>
@@ -125,7 +125,7 @@ export async function createSupportQuery(
   await sendSupportQueryEmail({
     to: getSupportInboxEmail(),
     replyTo: contactEmail,
-    subject: `[Raunaq Help] ${input.topic} — ${input.subject}`,
+    subject: `[SaleChat Help] ${input.topic} — ${input.subject}`,
     text,
     html,
   });

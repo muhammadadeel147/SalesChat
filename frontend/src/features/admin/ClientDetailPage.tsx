@@ -616,9 +616,8 @@ export function ClientDetailPage() {
             const expanded = expandedUserId === u.id;
             return (
               <div key={u.id} className="overflow-hidden rounded-xl border border-border bg-white">
-                <button
-                  type="button"
-                  className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-surface-muted/50"
+                <div
+                  className="flex w-full cursor-pointer items-center gap-3 px-4 py-3 text-left hover:bg-surface-muted/50"
                   onClick={() => setExpandedUserId(expanded ? null : u.id)}
                 >
                   <span className="text-text-muted">{expanded ? '▾' : '▸'}</span>
@@ -672,7 +671,7 @@ export function ClientDetailPage() {
                       Delete
                     </Button>
                   </div>
-                </button>
+                </div>
                 {expanded && (
                   <div className="border-t border-border bg-surface-muted/30 px-4 py-3 text-sm">
                     <div className="grid gap-2 sm:grid-cols-2">

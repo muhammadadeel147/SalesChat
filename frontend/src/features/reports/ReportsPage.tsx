@@ -1,6 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import { Link } from '@/lib/next-nav';
 
 import { Card, CardHeader } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -345,11 +344,9 @@ export function ReportsPage() {
           title="Stock movement"
           subtitle="Recent inventory changes in this range"
           action={
-            <Link to="/pos/stock-movements">
-              <Button variant="secondary" size="sm">
-                View all
-              </Button>
-            </Link>
+            <Button href="/pos/stock-movements" variant="secondary" size="sm">
+              View all
+            </Button>
           }
         />
         {stockPreview.length === 0 ? (

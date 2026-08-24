@@ -74,7 +74,7 @@ export function SupportPage() {
 
   const whatsappWithContext = supportWhatsappUrl(
     [
-      'Hi, I need help with Raunaq POS.',
+      'Hi, I need help with SaleChat POS.',
       user?.fullName ? `Name: ${user.fullName}` : null,
       contactEmail.trim()
         ? `Email: ${contactEmail.trim()}`

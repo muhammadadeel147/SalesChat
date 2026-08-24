@@ -1,8 +1,7 @@
 import { BRAND } from '@/lib/shared';
 
 import { IconSidebarPanel } from '@/components/icons';
-import { RaunaqLogo } from '@/components/brand/RaunaqLogo';
-import { RaunaqMark } from '@/components/brand/RaunaqMark';
+import { SaleChatLogo, SaleChatMark } from '@/components/brand/SaleChatLogo';
 
 type SidebarHeaderProps = {
   collapsed: boolean;
@@ -42,16 +41,14 @@ function CollapsedMarkToggle({ onToggle }: { onToggle: () => void }) {
         title="Expand sidebar"
         className="sidebar-logo-mark-toggle group relative flex h-11 w-11 items-center justify-center rounded-xl transition-colors hover:bg-sidebar-hover"
       >
-        <RaunaqMark
-          size={32}
+        <SaleChatMark
+          size={36}
           tone="dark"
           className="sidebar-logo-mark-swap pointer-events-none will-change-[transform,opacity,filter]"
         />
         <IconSidebarPanel className="sidebar-logo-panel-swap pointer-events-none absolute h-5 w-5 text-brand-100 will-change-[transform,opacity,filter]" />
       </button>
-      <p className="sidebar-logo-brand-name text-center text-[11px] font-semibold tracking-wide text-white">
-        {BRAND.name}
-      </p>
+      <p className="sidebar-logo-brand-name sr-only">{BRAND.name}</p>
     </div>
   );
 }
@@ -68,7 +65,7 @@ export function SidebarHeader({ collapsed, onToggle, subtitle }: SidebarHeaderPr
   return (
     <div className="shrink-0 border-b border-sidebar-border px-2.5 py-3">
       <div className="flex items-start justify-between gap-1.5">
-        <RaunaqLogo variant="compact" tone="dark" className="min-w-0 flex-1" />
+        <SaleChatLogo variant="compact" tone="dark" className="min-w-0 flex-1" />
         <SidebarPanelButton
           onClick={onToggle}
           label="Collapse sidebar"
@@ -76,9 +73,7 @@ export function SidebarHeader({ collapsed, onToggle, subtitle }: SidebarHeaderPr
         />
       </div>
       {subtitle && (
-        <p className="mt-1.5 pl-[2.75rem] text-[9px] font-medium tracking-wide text-brand-200/55">
-          {subtitle}
-        </p>
+        <p className="mt-1.5 text-[9px] font-medium tracking-wide text-brand-200/55">{subtitle}</p>
       )}
     </div>
   );

@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Button } from '@/components/marketing/Button';
-import { APP_SIGNUP_URL, BRAND } from '@/lib/constants';
+import { APP_TRIAL_URL, BRAND } from '@/lib/constants';
 import { pageMetadata } from '@/lib/seo';
 
 export const metadata: Metadata = pageMetadata({
@@ -50,7 +50,7 @@ export default function AboutPage() {
           designs and ships {BRAND.name} for businesses that need practical cloud systems.
         </p>
 
-        <Button href={APP_SIGNUP_URL} size="md">
+        <Button href={APP_TRIAL_URL} size="md" target="_blank" rel="noopener noreferrer">
           Start free trial
         </Button>
       </div>

@@ -58,7 +58,7 @@ assertProductionSecrets(nodeEnv, jwtSecret, jwtRefreshSecret);
 
 const defaultUpgradeWhatsapp =
   'https://wa.me/923462734539?text=' +
-  encodeURIComponent("Hi, I'd like to upgrade my Raunaq POS plan");
+  encodeURIComponent("Hi, I'd like to upgrade my SaleChat POS plan");
 
 export const appConfig: AppConfig = {
   port: parseInt(process.env.PORT ?? '3001', 10),

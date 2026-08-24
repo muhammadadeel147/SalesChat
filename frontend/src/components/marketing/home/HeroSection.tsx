@@ -1,6 +1,5 @@
 import Image from 'next/image';
-import Link from 'next/link';
-import { APP_LOGIN_URL, APP_SIGNUP_URL } from '@/lib/constants';
+import { APP_LOGIN_URL, APP_TRIAL_URL } from '@/lib/constants';
 import { Reveal } from '../Reveal';
 import { Button } from '../Button';
 import { MaterialIcon } from '../MaterialIcon';
@@ -44,7 +43,7 @@ export function HeroSection() {
     <section className="relative isolate w-full overflow-hidden py-3 sm:py-4">
       <div className="site-shell">
         <Reveal>
-          <div className="relative mx-auto flex max-h-[calc(100svh-5.5rem)] w-full max-w-[90rem] flex-col overflow-hidden rounded-site bg-gradient-to-br from-[#bc6b32] via-[#a75a28] to-[#8a4a1c] px-4 py-4 sm:px-6 sm:py-5 lg:max-h-[calc(100svh-5.75rem)] lg:px-10 lg:py-6">
+          <div className="relative mx-auto flex max-h-[calc(100svh-5.5rem)] w-full max-w-[90rem] flex-col overflow-hidden rounded-site bg-gradient-to-br from-[#059669] via-[#047857] to-[#065f46] px-4 py-4 sm:px-6 sm:py-5 lg:max-h-[calc(100svh-5.75rem)] lg:px-10 lg:py-6">
             <div className="pointer-events-none absolute -right-12 top-0 h-40 w-40 rounded-full bg-primary-container/15 blur-3xl" />
             <div className="pointer-events-none absolute -bottom-12 left-8 h-36 w-36 rounded-full bg-on-primary-container/30 blur-3xl" />
 
@@ -62,10 +61,12 @@ export function HeroSection() {
 
                   <div className="mt-6 flex w-full flex-col gap-2.5 sm:mt-8 sm:flex-row sm:items-center">
                     <Button
-                      href={APP_SIGNUP_URL}
+                      href={APP_TRIAL_URL}
                       variant="white"
                       size="md"
                       className="group w-full px-6 py-2.5 text-[0.95rem] font-extrabold sm:w-auto"
+                      target="_blank"
+                      rel="noopener noreferrer"
                     >
                       Start Free Trial
                       <MaterialIcon
@@ -83,12 +84,12 @@ export function HeroSection() {
                     </Button>
                   </div>
 
-                  <Link
+                  <a
                     href={APP_LOGIN_URL}
                     className="mt-4 text-body-sm font-semibold text-pure-white/90 transition-colors hover:text-pure-white hover:underline sm:mt-5"
                   >
                     Already have an account? Login
-                  </Link>
+                  </a>
                 </div>
 
                 <div className="mx-auto grid w-full max-w-[280px] grid-cols-2 gap-3 sm:max-w-[320px] sm:gap-4 lg:max-w-none lg:gap-5">

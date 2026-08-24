@@ -2,41 +2,42 @@
 @source "../**/*.{ts,tsx}";
 
 @theme {
-  --color-primary: #bc6b32;
+  /* SaleChat marketing — teal/emerald */
+  --color-primary: #059669;
   --color-on-primary: #ffffff;
-  --color-primary-container: #ffdbca;
-  --color-on-primary-container: #331300;
-  --color-surface: #f2f0ef;
-  --color-on-surface: #1d1b1a;
-  --color-surface-variant: #e4e2e0;
-  --color-on-surface-variant: #52443c;
+  --color-primary-container: #d1faf0;
+  --color-on-primary-container: #064e3b;
+  --color-surface: #f4faf8;
+  --color-on-surface: #0f2926;
+  --color-surface-variant: #d1e7e2;
+  --color-on-surface-variant: #5f7a75;
   --color-surface-container-lowest: #ffffff;
-  --color-surface-container-low: #f5f3f2;
-  --color-surface-container: #f0eeeb;
-  --color-surface-container-high: #eae8e6;
-  --color-surface-container-highest: #e4e2e0;
-  --color-background: #f2f0ef;
-  --color-on-background: #1d1b1a;
-  --color-tertiary: #3f6374;
+  --color-surface-container-low: #f4faf8;
+  --color-surface-container: #ecfdf8;
+  --color-surface-container-high: #d1faf0;
+  --color-surface-container-highest: #a7f3e0;
+  --color-background: #f4faf8;
+  --color-on-background: #0f2926;
+  --color-tertiary: #0284c7;
   --color-on-tertiary: #ffffff;
-  --color-tertiary-container: #c3e8fd;
-  --color-on-tertiary-container: #001f2a;
-  --color-secondary: #765749;
+  --color-tertiary-container: #e0f2fe;
+  --color-on-tertiary-container: #0c4a6e;
+  --color-secondary: #0f766e;
   --color-on-secondary: #ffffff;
-  --color-secondary-container: #ffdbca;
-  --color-on-secondary-container: #2b160b;
-  --color-outline: #85736b;
-  --color-outline-variant: #d7c2b8;
+  --color-secondary-container: #ccfbf1;
+  --color-on-secondary-container: #042f2e;
+  --color-outline: #5f7a75;
+  --color-outline-variant: #a8d5cc;
   --color-pure-white: #ffffff;
-  --color-deep-slate: #1f1d1c;
-  --color-inverse-surface: #363433;
-  --color-inverse-on-surface: #fbefea;
-  --color-inverse-primary: #ffb68c;
-  --color-surface-bright: #fbf9f8;
-  --color-surface-dim: #dbdad9;
-  --color-primary-fixed: #ffb68c;
-  --color-primary-fixed-dim: #e8955a;
-  --color-caramel: #bc6b32;
+  --color-deep-slate: #0c3d38;
+  --color-inverse-surface: #0f2926;
+  --color-inverse-on-surface: #ecfdf8;
+  --color-inverse-primary: #34d399;
+  --color-surface-bright: #ffffff;
+  --color-surface-dim: #d1e7e2;
+  --color-primary-fixed: #6ee7c7;
+  --color-primary-fixed-dim: #10b981;
+  --color-caramel: #059669;
 
   --color-brand-50: #ecfdf8;
   --color-brand-100: #d1faf0;
@@ -79,10 +80,10 @@
   --radius-3xl: 2.5rem;
   --radius-site: 2.5rem;
 
-  --shadow-header: 0 4px 20px rgba(31, 29, 28, 0.05);
-  --shadow-card: 0 4px 20px rgba(33, 37, 41, 0.05);
-  --shadow-card-hover: 0 12px 30px rgba(188, 107, 50, 0.12);
-  --shadow-pos-hub: 0 12px 40px rgba(188, 107, 50, 0.15);
+  --shadow-header: 0 4px 20px rgba(6, 78, 59, 0.08);
+  --shadow-card: 0 4px 20px rgba(6, 78, 59, 0.06);
+  --shadow-card-hover: 0 12px 30px rgba(5, 150, 105, 0.14);
+  --shadow-pos-hub: 0 12px 40px rgba(5, 150, 105, 0.18);
 }
 
 html {
