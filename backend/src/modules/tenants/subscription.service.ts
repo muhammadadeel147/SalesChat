@@ -1,0 +1,278 @@
+import type { Tenant, TenantFeeStatus, TenantTier } from '@prisma/client';
+import {
+  getEffectivePlan,
+  getSubscriptionDaysRemaining,
+  type EffectivePlanResult,
+  type TenantPlanInput,
+} from '../../constants/index.js';
+
+import { ForbiddenError, UnauthorizedError } from '../core/errors.js';
+import { prisma } from '../core/prisma.js';
+import { writeAuditLog } from '../audit/audit.service.js';
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+export function computeSubscriptionEndsAt(start: Date, days: number): Date {
+  return new Date(start.getTime() + days * MS_PER_DAY);
+}
+
+export { getSubscriptionDaysRemaining };
+
+export function toPlanInput(tenant: Tenant): TenantPlanInput {
+  return {
+    tier: tenant.tier as TenantPlanInput['tier'],
+    trialPlanTier: (tenant.trialPlanTier ?? tenant.tier) as TenantPlanInput['trialPlanTier'],
+    feeStatus: tenant.feeStatus,
+    subscriptionStartAt: tenant.subscriptionStartAt,
+    subscriptionEndsAt: tenant.subscriptionEndsAt,
+    subscriptionDays: tenant.subscriptionDays,
+    isActive: tenant.isActive,
+    accessRevokedAt: tenant.accessRevokedAt,
+    accessRevokeReason: tenant.accessRevokeReason,
+  };
+}
+
+export function getTenantEffectivePlan(tenant: Tenant, now = new Date()): EffectivePlanResult {
+  return getEffectivePlan(toPlanInput(tenant), now);
+}
+
+export function serializeSubscriptionFields(tenant: Tenant, now = new Date()) {
+  const effective = getTenantEffectivePlan(tenant, now);
+  const isTrial = tenant.feeStatus === 'TRIAL';
+
+  const billingCycle = tenant.subscriptionDays >= 300 ? 'yearly' : 'monthly';
+
+  return {
+    isTrial,
+    trialPlanTier: isTrial ? (tenant.trialPlanTier ?? tenant.tier) : null,
+    subscriptionStartAt: tenant.subscriptionStartAt?.toISOString() ?? null,
+    subscriptionEndsAt: tenant.subscriptionEndsAt?.toISOString() ?? null,
+    subscriptionDays: tenant.subscriptionDays,
+    billingCycle,
+    accessRevokedAt: tenant.accessRevokedAt?.toISOString() ?? null,
+    accessRevokeReason: tenant.accessRevokeReason,
+    daysRemaining: effective.daysRemaining,
+    subscriptionExpired: effective.isSoftLocked,
+    isTrialActive: effective.isTrialActive,
+    isPaidActive: effective.isPaidActive,
+    isSoftLocked: effective.isSoftLocked,
+    effectivePlan: effective.effectivePlan,
+    assignedPlan: effective.assignedPlan,
+    trialPlan: isTrial ? effective.trialPlan : null,
+    accessStatus: effective.accessStatus,
+  };
+}
+
+async function revokeTenantRefreshTokens(tenantId: string): Promise<void> {
+  const users = await prisma.user.findMany({
+    where: { tenantId, deletedAt: null },
+    select: { id: true },
+  });
+  const userIds = users.map((u) => u.id);
+  if (userIds.length === 0) return;
+
+  await prisma.refreshToken.updateMany({
+    where: { userId: { in: userIds }, revokedAt: null },
+    data: { revokedAt: new Date() },
+  });
+}
+
+function startOfUtcDay(date: Date): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
+/** Mark fee overdue for ops visibility — does NOT hard-block portal access. */
+async function applyAutoFeeOverdue(tenant: Tenant): Promise<TenantFeeStatus> {
+  if (tenant.feeStatus !== 'ACTIVE' || !tenant.feeDueDate) {
+    return tenant.feeStatus;
+  }
+
+  const today = startOfUtcDay(new Date());
+  const due = startOfUtcDay(tenant.feeDueDate);
+  if (today.getTime() <= due.getTime()) {
+    return tenant.feeStatus;
+  }
+
+  await prisma.tenant.update({
+    where: { id: tenant.id },
+    data: { feeStatus: 'OVERDUE' },
+  });
+
+  return 'OVERDUE';
+}
+
+/**
+ * Expiry is enforced at read/login time via getEffectivePlan + assertTenantPortalAccess.
+ * No destructive DB update required when a window ends.
+ */
+export async function processTenantSubscriptionExpiry(_tenantId: string): Promise<void> {
+  // Hard-block is computed at read time — no destructive update.
+}
+
+export async function processAllExpiredTenants(): Promise<number> {
+  return 0;
+}
+
+export class TenantAccessBlockedError extends ForbiddenError {
+  constructor(message: string, code: string, details?: unknown) {
+    super(message, code, details);
+  }
+}
+
+function throwPortalBlocked(
+  options: { forLogin?: boolean },
+  message: string,
+  code: string,
+  details?: unknown,
+): never {
+  if (options.forLogin) throw new UnauthorizedError(message, code, details);
+  throw new TenantAccessBlockedError(message, code, details);
+}
+
+/**
+ * Hard-block for: missing tenant, manual revoke, inactive flag, or ended trial/paid window.
+ * Expired shops cannot log in until an admin renews or converts them to paid.
+ */
+export async function assertTenantPortalAccess(
+  tenantId: string,
+  options: { forLogin?: boolean } = {},
+): Promise<void> {
+  const tenant = await prisma.tenant.findFirst({
+    where: { id: tenantId, deletedAt: null },
+  });
+
+  if (!tenant) {
+    throwPortalBlocked(options, 'Shop account not found or has been removed', 'TENANT_NOT_FOUND');
+  }
+
+  await applyAutoFeeOverdue(tenant);
+
+  const manuallyRevoked = Boolean(tenant.accessRevokedAt);
+  const inactiveBlocked = !tenant.isActive;
+
+  if (manuallyRevoked || inactiveBlocked) {
+    throwPortalBlocked(
+      options,
+      tenant.accessRevokeReason ??
+        'Portal access has been revoked for this shop. Contact your administrator.',
+      'TENANT_ACCESS_REVOKED',
+    );
+  }
+
+  const effective = getTenantEffectivePlan(tenant);
+  if (effective.isSoftLocked) {
+    const isTrial =
+      effective.accessStatus === 'trial_expired' ||
+      effective.accessStatus === 'trial_expired_starter';
+    throwPortalBlocked(
+      options,
+      isTrial
+        ? 'Your trial has ended. Convert to a paid plan to continue using Raunaq POS.'
+        : 'Your subscription period has ended. Pay to continue using Raunaq POS.',
+      isTrial ? 'TENANT_TRIAL_EXPIRED' : 'TENANT_SUBSCRIPTION_EXPIRED',
+      {
+        reason: isTrial ? 'trial_expired' : 'subscription_expired',
+        assignedPlan: effective.assignedPlan,
+        subscriptionEndsAt: effective.subscriptionEndsAt,
+      },
+    );
+  }
+}
+
+export async function revokeTenantAccess(
+  tenantId: string,
+  reason: string,
+  revokedById: string,
+  ipAddress?: string,
+): Promise<void> {
+  const tenant = await prisma.tenant.findFirst({
+    where: { id: tenantId, deletedAt: null },
+  });
+  if (!tenant) return;
+
+  await prisma.tenant.update({
+    where: { id: tenantId },
+    data: {
+      isActive: false,
+      feeStatus: 'SUSPENDED',
+      accessRevokedAt: new Date(),
+      accessRevokeReason: reason,
+    },
+  });
+
+  await revokeTenantRefreshTokens(tenantId);
+
+  await writeAuditLog({
+    tenantId,
+    userId: revokedById,
+    action: 'tenant.access_revoked',
+    entityType: 'tenant',
+    entityId: tenantId,
+    metadata: { reason },
+    ipAddress,
+  });
+}
+
+export async function restoreTenantAccess(
+  tenantId: string,
+  input: {
+    subscriptionStartAt?: Date;
+    subscriptionDays?: number;
+    feeStatus?: TenantFeeStatus;
+    clearRevoke?: boolean;
+    trialPlanTier?: TenantTier;
+  },
+  restoredById: string,
+  ipAddress?: string,
+): Promise<void> {
+  const tenant = await prisma.tenant.findFirst({
+    where: { id: tenantId, deletedAt: null },
+  });
+  if (!tenant) return;
+
+  const start = input.subscriptionStartAt ?? new Date();
+  const days = input.subscriptionDays ?? tenant.subscriptionDays ?? 30;
+  const endsAt = computeSubscriptionEndsAt(start, days);
+  const feeStatus = input.feeStatus ?? 'ACTIVE';
+
+  await prisma.tenant.update({
+    where: { id: tenantId },
+    data: {
+      isActive: true,
+      feeStatus,
+      subscriptionStartAt: start,
+      subscriptionEndsAt: endsAt,
+      subscriptionDays: days,
+      trialPlanTier:
+        feeStatus === 'TRIAL' ? (input.trialPlanTier ?? tenant.trialPlanTier ?? tenant.tier) : null,
+      accessRevokedAt: input.clearRevoke !== false ? null : undefined,
+      accessRevokeReason: input.clearRevoke !== false ? null : undefined,
+    },
+  });
+
+  await writeAuditLog({
+    tenantId,
+    userId: restoredById,
+    action: 'tenant.access_restored',
+    entityType: 'tenant',
+    entityId: tenantId,
+    metadata: {
+      subscriptionStartAt: start.toISOString(),
+      subscriptionEndsAt: endsAt.toISOString(),
+      subscriptionDays: days,
+      feeStatus,
+    },
+    ipAddress,
+  });
+}
+
+export function startSubscriptionInterval(logger: {
+  info: (obj: unknown, msg?: string) => void;
+}): NodeJS.Timeout {
+  // Expiry hard-block is evaluated on login/API; keep a light heartbeat for ops visibility.
+  const run = () => {
+    logger.info('Subscription hard-expiry mode active (block login when window ends)');
+  };
+  run();
+  return setInterval(run, 24 * 60 * 60 * 1000);
+}
