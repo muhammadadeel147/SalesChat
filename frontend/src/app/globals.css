@@ -350,7 +350,7 @@ body {
 
 .text-body-sm {
   font-size: clamp(0.75rem, 0.6vw + 0.4rem, 0.8125rem);
-  line-height: 1.5;
+  line-height: 1.6;
 }
 
 .gap-base {
