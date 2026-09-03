@@ -9,6 +9,7 @@ const globalForPrisma = globalThis as unknown as {
 /** Models that always carry tenant_id and should be auto-scoped when context is set. */
 const TENANT_SCOPED_MODELS = new Set([
   'Category',
+  'ShopPart',
   'Brand',
   'Supplier',
   'SupplierLedgerEntry',

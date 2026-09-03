@@ -59,7 +59,7 @@ export function SalesHistoryPage() {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
-  const { range, setRange, customFrom, setCustomFrom, customTo, setCustomTo, dates } =
+  const { range, setRange, customFrom, setCustomFrom, customTo, setCustomTo, selectedMonth, setSelectedMonth, dates } =
     useDateRangeFilter('today');
   const [selected, setSelected] = useState<SaleDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
@@ -253,6 +253,8 @@ export function SalesHistoryPage() {
         customTo={customTo}
         onCustomFromChange={setCustomFrom}
         onCustomToChange={setCustomTo}
+        selectedMonth={selectedMonth}
+        onSelectedMonthChange={setSelectedMonth}
         from={dates.from}
         to={dates.to}
       />

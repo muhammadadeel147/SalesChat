@@ -22,6 +22,7 @@ export const FEATURE_LABELS: Partial<Record<FeatureKey, string>> = {
   [FEATURES.INVENTORY_EDIT]: 'Edit products',
   [FEATURES.INVENTORY_STOCK_ADJUST]: 'Stock adjustments',
   [FEATURES.INVENTORY_CATEGORIES]: 'Categories',
+  [FEATURES.INVENTORY_SHOP_PARTS]: 'Shop parts',
   [FEATURES.INVENTORY_BRANDS]: 'Brands',
   [FEATURES.INVENTORY_SUPPLIERS]: 'Suppliers',
   [FEATURES.INVENTORY_PRODUCT_IMAGES]: 'Product images',

@@ -17,6 +17,7 @@ export const SYNC_TABLES = {
   salePayments: 'sale_payments',
   products: 'products',
   categories: 'categories',
+  shopParts: 'shop_parts',
   customers: 'customers',
   customerLedgerEntries: 'customer_ledger_entries',
   customerCreditObligations: 'customer_credit_obligations',

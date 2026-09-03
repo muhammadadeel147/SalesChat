@@ -38,6 +38,7 @@ export function Button({
   className = '',
   children,
   href,
+  type = 'button',
   ...props
 }: ButtonProps) {
   const classes = `inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-xl font-medium transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-50 ${variants[variant]} ${sizes[size]} ${className}`;
@@ -59,7 +60,7 @@ export function Button({
   }
 
   return (
-    <button type="button" disabled={disabled || loading} className={classes} {...props}>
+    <button type={type} disabled={disabled || loading} className={classes} {...props}>
       {content}
     </button>
   );

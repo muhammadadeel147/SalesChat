@@ -16,6 +16,7 @@ export const FEATURES = {
   INVENTORY_VIEW: 'inventory.view',
   INVENTORY_EDIT: 'inventory.edit',
   INVENTORY_CATEGORIES: 'inventory.categories',
+  INVENTORY_SHOP_PARTS: 'inventory.shop_parts',
   INVENTORY_STOCK_ADJUST: 'inventory.stock_adjust',
   INVENTORY_BRANDS: 'inventory.brands',
   INVENTORY_SUPPLIERS: 'inventory.suppliers',

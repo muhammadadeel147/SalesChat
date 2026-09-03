@@ -62,10 +62,12 @@ function HorizontalBar({
 export function ReportsPage() {
   const { user, branchId } = useAuth();
   const [date, setDate] = useState(todayIso());
-  const { range, setRange, customFrom, setCustomFrom, customTo, setCustomTo, dates } =
+  const [partFilter, setPartFilter] = useState('');
+  const { range, setRange, customFrom, setCustomFrom, customTo, setCustomTo, selectedMonth, setSelectedMonth, dates } =
     useDateRangeFilter('today');
 
   const canStaffPerf = hasFeature(user, FEATURES.USERS_MANAGE);
+  const canShopParts = hasFeature(user, FEATURES.INVENTORY_SHOP_PARTS);
 
   const { data: settings } = useQuery({
     queryKey: ['settings'],
@@ -75,6 +77,18 @@ export function ReportsPage() {
   const { data: summary } = useQuery({
     queryKey: ['reports', 'summary', dates.from, dates.to, branchId],
     queryFn: () => api.reports.salesSummary(dates.from, dates.to, branchId ?? undefined),
+  });
+
+  const { data: partsSummary } = useQuery({
+    queryKey: ['reports', 'shop-parts', dates.from, dates.to, branchId, partFilter],
+    queryFn: () =>
+      api.reports.shopPartsSummary(
+        dates.from,
+        dates.to,
+        branchId ?? undefined,
+        partFilter || undefined,
+      ),
+    enabled: canShopParts,
   });
 
   const { data: daily, isLoading } = useQuery({
@@ -103,6 +117,7 @@ export function ReportsPage() {
     { label: 'Net revenue', value: toNumber(summary?.revenue), color: 'bg-brand-600' },
     { label: 'Returns', value: toNumber(summary?.returnsAmount), color: 'bg-orange-500' },
     { label: 'Gross Profit', value: toNumber(summary?.grossProfit), color: 'bg-emerald-500' },
+    { label: 'COGS', value: toNumber(summary?.cost), color: 'bg-slate-500' },
     { label: 'Tax', value: toNumber(summary?.taxTotal), color: 'bg-sky-500' },
     { label: 'Discount', value: toNumber(summary?.discountTotal), color: 'bg-rose-500' },
   ];
@@ -128,6 +143,7 @@ export function ReportsPage() {
       ['Average ticket', summary?.averageTicket ?? '0'],
       ['Discount given', summary?.discountTotal ?? '0'],
       ['Tax collected', summary?.taxTotal ?? '0'],
+      ['Cost of goods (COGS)', summary?.cost ?? '0'],
       ['Gross profit', summary?.grossProfit ?? '0'],
     ]);
   };
@@ -155,6 +171,8 @@ export function ReportsPage() {
           customTo={customTo}
           onCustomFromChange={setCustomFrom}
           onCustomToChange={setCustomTo}
+          selectedMonth={selectedMonth}
+          onSelectedMonthChange={setSelectedMonth}
           from={dates.from}
           to={dates.to}
           className="mb-0"
@@ -162,7 +180,10 @@ export function ReportsPage() {
       </Card>
 
       <Card className="mb-6">
-        <CardHeader title="Sales summary" subtitle={`${dates.from} to ${dates.to}`} />
+        <CardHeader
+          title="Sales summary"
+          subtitle={`${dates.from} to ${dates.to} · COGS uses cost at sale (batch/product snapshot), not live price`}
+        />
         <div className="mb-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
           <div className="rounded-xl bg-brand-50 px-4 py-3">
             <p className="text-xs text-text-muted">Net revenue</p>
@@ -192,10 +213,9 @@ export function ReportsPage() {
             </p>
           </div>
           <div className="rounded-xl bg-surface-muted px-4 py-3">
-            <p className="text-xs text-text-muted">Discount given</p>
-            <p className="text-xl font-bold text-danger">
-              {formatMoney(summary?.discountTotal ?? '0', currency)}
-            </p>
+            <p className="text-xs text-text-muted">COGS</p>
+            <p className="text-xl font-bold">{formatMoney(summary?.cost ?? '0', currency)}</p>
+            <p className="mt-1 text-[10px] text-text-muted">At sale cost</p>
           </div>
           <div className="rounded-xl bg-surface-muted px-4 py-3">
             <p className="text-xs text-text-muted">Gross profit</p>
@@ -267,6 +287,87 @@ export function ReportsPage() {
           </div>
         )}
       </Card>
+
+      {canShopParts && (partsSummary?.parts.length ?? 0) > 0 && (
+        <Card className="mb-6">
+          <CardHeader
+            title="By shop part"
+            subtitle="Combined shop total plus each part's revenue, profit, and purchases"
+            action={
+              <select
+                className="rounded-lg border border-border bg-white px-2 py-1.5 text-sm"
+                value={partFilter}
+                onChange={(e) => setPartFilter(e.target.value)}
+              >
+                <option value="">All parts</option>
+                {partsSummary?.parts.map((part) => (
+                  <option key={part.partId ?? 'unassigned'} value={part.partId ?? 'none'}>
+                    {part.name}
+                  </option>
+                ))}
+              </select>
+            }
+          />
+          <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="rounded-xl bg-brand-50 px-4 py-3">
+              <p className="text-xs text-text-muted">Combined revenue</p>
+              <p className="text-lg font-bold">
+                {formatMoney(partsSummary?.combined.revenue ?? '0', currency)}
+              </p>
+            </div>
+            <div className="rounded-xl bg-surface-muted px-4 py-3">
+              <p className="text-xs text-text-muted">Combined profit</p>
+              <p className="text-lg font-bold">
+                {formatMoney(partsSummary?.combined.grossProfit ?? '0', currency)}
+              </p>
+            </div>
+            <div className="rounded-xl bg-surface-muted px-4 py-3">
+              <p className="text-xs text-text-muted">Combined COGS</p>
+              <p className="text-lg font-bold">
+                {formatMoney(partsSummary?.combined.cost ?? '0', currency)}
+              </p>
+            </div>
+            <div className="rounded-xl bg-surface-muted px-4 py-3">
+              <p className="text-xs text-text-muted">Combined purchases</p>
+              <p className="text-lg font-bold">
+                {formatMoney(partsSummary?.combined.purchaseTotal ?? '0', currency)}
+              </p>
+            </div>
+          </div>
+          <div className="overflow-x-auto rounded-xl border border-border">
+            <table className="w-full min-w-[640px] text-sm">
+              <thead>
+                <tr className="bg-surface-muted text-left text-xs font-semibold uppercase text-text-muted">
+                  <th className="px-4 py-3">Part</th>
+                  <th className="px-4 py-3">Revenue</th>
+                  <th className="px-4 py-3">COGS</th>
+                  <th className="px-4 py-3">Profit</th>
+                  <th className="px-4 py-3">Purchases</th>
+                  <th className="px-4 py-3">Sales</th>
+                </tr>
+              </thead>
+              <tbody>
+                {partsSummary?.parts.map((part) => (
+                  <tr key={part.partId ?? 'unassigned'} className="border-t border-border/60">
+                    <td className="px-4 py-3 font-medium">{part.name}</td>
+                    <td className="px-4 py-3 tabular-nums">
+                      {formatMoney(part.revenue, currency)}
+                    </td>
+                    <td className="px-4 py-3 tabular-nums">{formatMoney(part.cost, currency)}</td>
+                    <td className="px-4 py-3 tabular-nums">
+                      {formatMoney(part.grossProfit, currency)}
+                    </td>
+                    <td className="px-4 py-3 tabular-nums">
+                      {formatMoney(part.purchaseTotal, currency)}
+                    </td>
+                    <td className="px-4 py-3 tabular-nums">{part.transactionCount}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
 
       {(discountUsage?.length ?? 0) > 0 && (
         <Card className="mb-6">

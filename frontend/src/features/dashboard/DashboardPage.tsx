@@ -7,6 +7,7 @@ import { Link } from '@/lib/next-nav';
 import { IconSale } from '@/components/icons';
 import { Card } from '@/components/ui/Card';
 import { DateRangeFilter } from '@/components/ui/DateRangeFilter';
+import { MonthSelectDropdown } from '@/components/ui/MonthSelectDropdown';
 import { ListSkeleton } from '@/components/ui/PageSkeleton';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { QueryError } from '@/components/ui/QueryError';
@@ -37,9 +38,10 @@ const CHART_IDS: DashboardWidgetId[] = [
 
 export function DashboardPage() {
   const { user, branchId } = useAuth();
-  const { range, setRange, customFrom, setCustomFrom, customTo, setCustomTo, dates } =
+  const { range, setRange, customFrom, setCustomFrom, customTo, setCustomTo, selectedMonth, setSelectedMonth, dates } =
     useDateRangeFilter('today');
   const canCustomize = hasFeature(user, FEATURES.UI_CUSTOMIZE);
+  const canShopParts = hasFeature(user, FEATURES.INVENTORY_SHOP_PARTS);
   const [showLayoutCustomize, setShowLayoutCustomize] = useState(false);
 
   const { data: settings } = useQuery({
@@ -53,6 +55,14 @@ export function DashboardPage() {
     queryFn: () => api.reports.dashboard(branchId ?? undefined, dates.from, dates.to),
     staleTime: 0,
     refetchOnMount: 'always',
+  });
+
+  const { data: partsSummary } = useQuery({
+    queryKey: ['reports', 'shop-parts', 'dashboard', dates.from, dates.to, branchId],
+    queryFn: () =>
+      api.reports.shopPartsSummary(dates.from, dates.to, branchId ?? undefined),
+    enabled: canShopParts && hasFeature(user, FEATURES.REPORTS_VIEW),
+    staleTime: 60_000,
   });
 
   const layout = useMemo(
@@ -77,6 +87,21 @@ export function DashboardPage() {
   const lowStockCount = data?.lowStockCount ?? data?.lowStockAlerts?.length ?? 0;
   const lowStockPreview = (data?.lowStockAlerts ?? []).slice(0, 5);
   const showLoading = isLoading || (isFetching && !data);
+  const shopParts = partsSummary?.parts ?? [];
+  // Equal-width fill of the section; wrap after 6 per row.
+  const shopPartCols = Math.min(Math.max(shopParts.length, 1), 6);
+  const shopPartsGridClass =
+    shopPartCols <= 1
+      ? 'grid-cols-1'
+      : shopPartCols === 2
+        ? 'grid-cols-1 sm:grid-cols-2'
+        : shopPartCols === 3
+          ? 'grid-cols-1 sm:grid-cols-3'
+          : shopPartCols === 4
+            ? 'grid-cols-2 lg:grid-cols-4'
+            : shopPartCols === 5
+              ? 'grid-cols-2 md:grid-cols-3 lg:grid-cols-5'
+              : 'grid-cols-2 md:grid-cols-3 lg:grid-cols-6';
 
   const returnsCard = (
     <Card key="returns">
@@ -231,6 +256,13 @@ export function DashboardPage() {
         subtitle={settings?.businessName ?? 'Your business overview'}
         action={
           <div className="flex flex-wrap items-center gap-2">
+            <MonthSelectDropdown
+              variant="header"
+              range={range}
+              selectedMonth={selectedMonth}
+              onSelectMonth={setSelectedMonth}
+              onRangeChange={setRange}
+            />
             {canCustomize && (
               <button
                 type="button"
@@ -259,9 +291,44 @@ export function DashboardPage() {
         customTo={customTo}
         onCustomFromChange={setCustomFrom}
         onCustomToChange={setCustomTo}
+        selectedMonth={selectedMonth}
+        onSelectedMonthChange={setSelectedMonth}
         from={dates.from}
         to={dates.to}
       />
+
+      {canShopParts && shopParts.length > 0 && (
+        <Card className="mt-6">
+          <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+            <div>
+              <h2 className="text-base font-semibold text-text">Shop parts</h2>
+              <p className="text-xs text-text-muted">Revenue by part for the selected period</p>
+            </div>
+            <Link
+              to="/pos/shop-parts"
+              className="text-xs font-medium text-brand-700 hover:text-brand-800"
+            >
+              Manage parts
+            </Link>
+          </div>
+          <div className={`grid gap-3 ${shopPartsGridClass}`}>
+            {shopParts.map((part) => (
+              <div
+                key={part.partId ?? 'unassigned'}
+                className="min-w-0 rounded-xl border border-border bg-surface-muted/60 px-4 py-4"
+              >
+                <p className="truncate text-sm font-semibold text-text">{part.name}</p>
+                <p className="mt-1 text-lg font-bold tabular-nums sm:text-xl">
+                  {formatMoney(part.revenue, currency)}
+                </p>
+                <p className="mt-0.5 text-xs text-text-muted">
+                  Profit {formatMoney(part.grossProfit, currency)}
+                </p>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       <div className="space-y-0">{bodyNodes}</div>
 

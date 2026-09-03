@@ -1,7 +1,8 @@
 import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
 
-import { NotFoundError } from '../core/errors.js';
+import type { TransactionClient } from '../core/prisma.js';
+import { NotFoundError, ValidationError } from '../core/errors.js';
 import { prisma } from '../core/prisma.js';
 import { toDecimal } from '../core/money.js';
 import {
@@ -11,6 +12,50 @@ import {
 } from '../core/text-match.js';
 import { SYNC_TABLES, syncInsert, syncUpdate } from '../sync/sync-payload.js';
 import { ensureMiscProduct } from '../billing/misc-product.js';
+import { getBatchStockCounts, type BatchStockCounts } from './batch.service.js';
+
+type StockLevel = 'healthy' | 'low' | 'out';
+
+function stockLevelForProduct(
+  p: {
+    trackStock: boolean;
+    trackType?: string;
+    stockQuantity: { toString(): string } | number;
+    lowStockThreshold: { toString(): string } | number | null;
+  },
+  batchCounts?: BatchStockCounts,
+): StockLevel {
+  if (!p.trackStock) return 'healthy';
+  const threshold = p.lowStockThreshold ? Number(p.lowStockThreshold) : 0;
+  const qty =
+    p.trackType === 'BATCH' ? (batchCounts?.total ?? 0) : Number(p.stockQuantity);
+  if (qty <= 0) return 'out';
+  if (threshold > 0 && qty <= threshold) return 'low';
+  return 'healthy';
+}
+
+async function serializeProductsWithBatchCounts(
+  tenantId: string,
+  products: Parameters<typeof serializeProduct>[0][],
+) {
+  const batchIds = products.filter((p) => p.trackType === 'BATCH').map((p) => p.id);
+  const batchCounts =
+    batchIds.length > 0 ? await getBatchStockCounts(tenantId, batchIds) : new Map<string, BatchStockCounts>();
+  return products.map((p) =>
+    serializeProduct(p, p.trackType === 'BATCH' ? batchCounts.get(p.id) : undefined),
+  );
+}
+
+async function serializeProductWithBatchCount(
+  tenantId: string,
+  product: Parameters<typeof serializeProduct>[0],
+) {
+  const batchCounts =
+    product.trackType === 'BATCH'
+      ? (await getBatchStockCounts(tenantId, [product.id])).get(product.id)
+      : undefined;
+  return serializeProduct(product, batchCounts);
+}
 
 export const categorySchema = z.object({
   name: z.string().min(1).max(255),
@@ -18,9 +63,21 @@ export const categorySchema = z.object({
   isActive: z.boolean().optional(),
 });
 
+export const shopPartSchema = z.object({
+  name: z.string().min(1).max(255),
+  sortOrder: z.number().int().optional(),
+  isActive: z.boolean().optional(),
+});
+
+export const bulkAssignPartSchema = z.object({
+  productIds: z.array(z.string().uuid()).min(1).max(500),
+  partId: z.string().uuid().nullable(),
+});
+
 export const productSchema = z.object({
   name: z.string().min(1).max(255),
   categoryId: z.string().uuid().optional().nullable(),
+  partId: z.string().uuid().optional().nullable(),
   brandId: z.string().uuid().optional().nullable(),
   supplierId: z.string().uuid().optional().nullable(),
   sku: z.string().max(100).optional().nullable(),
@@ -29,10 +86,13 @@ export const productSchema = z.object({
   unit: z.string().max(50).optional(),
   costPrice: z.number().nonnegative().optional().nullable(),
   sellPrice: z.number().nonnegative(),
+  batchSellPrice: z.number().nonnegative().optional().nullable(),
   taxRate: z.number().nonnegative().optional(),
   lowStockThreshold: z.number().nonnegative().optional().nullable(),
   expiryDate: z.string().optional().nullable(),
   trackStock: z.boolean().optional(),
+  trackType: z.enum(['SIMPLE', 'BATCH']).optional(),
+  dispensingLossPercent: z.number().min(0).max(100).optional(),
   isActive: z.boolean().optional(),
 });
 
@@ -50,6 +110,7 @@ export const importProductRowSchema = z.object({
   barcode: z.string().max(100).optional().nullable(),
   unit: z.string().max(50).optional(),
   categoryName: z.string().max(255).optional().nullable(),
+  partName: z.string().max(255).optional().nullable(),
   brandName: z.string().max(255).optional().nullable(),
   supplierName: z.string().max(255).optional().nullable(),
   stockQuantity: z.number().nonnegative().optional(),
@@ -131,11 +192,124 @@ export async function deleteCategory(tenantId: string, id: string) {
   });
 }
 
+async function backfillSaleItemsPartId(
+  tx: TransactionClient,
+  tenantId: string,
+  productIds: string[],
+  partId: string | null,
+) {
+  if (productIds.length === 0) return;
+  await tx.saleItem.updateMany({
+    where: { tenantId, productId: { in: productIds }, partId: null },
+    data: { partId },
+  });
+}
+
+export async function listShopParts(tenantId: string, search?: string) {
+  const searchIds = await findIdsByCompactSearch('shop_parts', tenantId, search ?? '', [], null);
+  if (searchIds && searchIds.length === 0) return [];
+
+  return prisma.shopPart.findMany({
+    where: {
+      tenantId,
+      deletedAt: null,
+      ...(searchIds ? { id: { in: searchIds } } : {}),
+    },
+    orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+  });
+}
+
+export async function createShopPart(tenantId: string, input: z.infer<typeof shopPartSchema>) {
+  const name = input.name.trim();
+  await assertUniqueCompactName('shop_parts', tenantId, name, 'shop part');
+
+  return prisma.$transaction(async (tx) => {
+    const part = await tx.shopPart.create({
+      data: {
+        tenantId,
+        name,
+        sortOrder: input.sortOrder ?? 0,
+        isActive: input.isActive ?? true,
+      },
+    });
+    await syncInsert(tx, SYNC_TABLES.shopParts, part);
+    return part;
+  });
+}
+
+export async function updateShopPart(
+  tenantId: string,
+  id: string,
+  input: Partial<z.infer<typeof shopPartSchema>>,
+) {
+  const part = await prisma.shopPart.findFirst({ where: { id, tenantId, deletedAt: null } });
+  if (!part) throw new NotFoundError('Shop part not found');
+
+  const name = input.name?.trim();
+  if (name) {
+    await assertUniqueCompactName('shop_parts', tenantId, name, 'shop part', id);
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.shopPart.update({
+      where: { id },
+      data: { name, sortOrder: input.sortOrder, isActive: input.isActive },
+    });
+    await syncUpdate(tx, SYNC_TABLES.shopParts, updated);
+    return updated;
+  });
+}
+
+export async function deleteShopPart(tenantId: string, id: string) {
+  const part = await prisma.shopPart.findFirst({ where: { id, tenantId, deletedAt: null } });
+  if (!part) throw new NotFoundError('Shop part not found');
+  return prisma.$transaction(async (tx) => {
+    await tx.product.updateMany({
+      where: { tenantId, partId: id },
+      data: { partId: null },
+    });
+    const updated = await tx.shopPart.update({
+      where: { id },
+      data: { deletedAt: new Date(), isActive: false },
+    });
+    await syncUpdate(tx, SYNC_TABLES.shopParts, updated);
+    return { success: true };
+  });
+}
+
+export async function bulkAssignProductsToPart(
+  tenantId: string,
+  input: z.infer<typeof bulkAssignPartSchema>,
+) {
+  await assertShopPartOwned(tenantId, input.partId);
+
+  const products = await prisma.product.findMany({
+    where: { tenantId, id: { in: input.productIds }, deletedAt: null },
+    select: { id: true },
+  });
+  if (products.length === 0) throw new NotFoundError('No matching products found');
+
+  const productIds = products.map((p) => p.id);
+
+  return prisma.$transaction(async (tx) => {
+    for (const productId of productIds) {
+      const updated = await tx.product.update({
+        where: { id: productId },
+        data: { partId: input.partId },
+      });
+      await syncUpdate(tx, SYNC_TABLES.products, updated);
+    }
+    await backfillSaleItemsPartId(tx, tenantId, productIds, input.partId);
+    return { updated: productIds.length, partId: input.partId };
+  });
+}
+
 export async function listProducts(
   tenantId: string,
   options?: {
     search?: string;
     categoryId?: string;
+    partId?: string;
     brandId?: string;
     stockStatus?: 'all' | 'healthy' | 'low' | 'out';
     page?: number;
@@ -157,6 +331,7 @@ export async function listProducts(
   if (idFilter) {
     const include = {
       category: { select: { id: true, name: true } },
+      part: { select: { id: true, name: true } },
       brand: { select: { id: true, name: true } },
       supplier: { select: { id: true, name: true } },
     } as const;
@@ -173,8 +348,9 @@ export async function listProducts(
     const ordered = idFilter
       .map((id) => byId.get(id))
       .filter((p): p is (typeof products)[number] => Boolean(p));
+    const data = await serializeProductsWithBatchCounts(tenantId, ordered);
     return {
-      data: ordered.map(serializeProduct),
+      data,
       meta: { total: ordered.length, page: 1, pageSize: ordered.length, totalPages: 1 },
     };
   }
@@ -199,33 +375,42 @@ export async function listProducts(
     deletedAt: null,
     ...(options?.activeOnly ? { isActive: true } : {}),
     ...(options?.categoryId ? { categoryId: options.categoryId } : {}),
+    ...(options?.partId === '__unassigned__' ? { partId: null } : {}),
+    ...(options?.partId && options.partId !== '__unassigned__'
+      ? { partId: options.partId }
+      : {}),
     ...(options?.brandId ? { brandId: options.brandId } : {}),
     ...(searchIds ? { id: { in: searchIds } } : {}),
-    ...(options?.stockStatus === 'out' ? { trackStock: true, stockQuantity: { lte: 0 } } : {}),
   };
 
   const include = {
     category: { select: { id: true, name: true } },
+    part: { select: { id: true, name: true } },
     brand: { select: { id: true, name: true } },
     supplier: { select: { id: true, name: true } },
   } as const;
 
-  // low/healthy compare two columns — filter after a DB-scoped fetch
-  if (options?.stockStatus === 'low' || options?.stockStatus === 'healthy') {
+  if (options?.stockStatus && options.stockStatus !== 'all') {
     const products = await prisma.product.findMany({
       where,
       include,
       orderBy: { name: 'asc' },
     });
-    const filtered = products.filter((p) => {
-      if (!p.trackStock) return options.stockStatus === 'healthy';
-      const qty = Number(p.stockQuantity);
-      const threshold = p.lowStockThreshold ? Number(p.lowStockThreshold) : 0;
-      if (options.stockStatus === 'low') return qty > 0 && threshold > 0 && qty <= threshold;
-      return qty > threshold || threshold === 0;
-    });
+    const batchIds = products.filter((p) => p.trackType === 'BATCH').map((p) => p.id);
+    const batchCounts =
+      batchIds.length > 0 ? await getBatchStockCounts(tenantId, batchIds) : new Map<string, BatchStockCounts>();
+    const filtered = products.filter(
+      (p) =>
+        stockLevelForProduct(
+          p,
+          p.trackType === 'BATCH' ? batchCounts.get(p.id) : undefined,
+        ) === options.stockStatus,
+    );
     const total = filtered.length;
-    const data = filtered.slice(skip, skip + pageSize).map(serializeProduct);
+    const pageRows = filtered.slice(skip, skip + pageSize);
+    const data = pageRows.map((p) =>
+      serializeProduct(p, p.trackType === 'BATCH' ? batchCounts.get(p.id) : undefined),
+    );
     return {
       data,
       meta: { total, page, pageSize, totalPages: Math.ceil(total / pageSize) },
@@ -240,25 +425,49 @@ export async function listProducts(
     take: pageSize,
   });
   const total = options?.skipCount ? products.length + skip : await prisma.product.count({ where });
+  const data = await serializeProductsWithBatchCounts(tenantId, products);
 
   return {
-    data: products.map(serializeProduct),
+    data,
     meta: { total, page, pageSize, totalPages: Math.ceil(total / pageSize) || 1 },
   };
 }
 
 export async function getInventorySummary(tenantId: string) {
-  // Only columns needed for aggregates — avoid loading full product rows over Railway↔DB.
-  const products = await prisma.product.findMany({
-    where: { tenantId, deletedAt: null, isActive: true },
-    select: {
-      costPrice: true,
-      sellPrice: true,
-      stockQuantity: true,
-      trackStock: true,
-      lowStockThreshold: true,
-    },
-  });
+  const [products, openBatches, batchCounts] = await Promise.all([
+    prisma.product.findMany({
+      where: { tenantId, deletedAt: null, isActive: true },
+      select: {
+        id: true,
+        costPrice: true,
+        sellPrice: true,
+        stockQuantity: true,
+        trackStock: true,
+        trackType: true,
+        lowStockThreshold: true,
+      },
+    }),
+    prisma.batch.findMany({
+      where: { tenantId, status: 'OPEN', product: { deletedAt: null, isActive: true } },
+      select: {
+        productId: true,
+        remainingQuantity: true,
+        costPerUnit: true,
+      },
+    }),
+    getBatchStockCounts(tenantId),
+  ]);
+
+  const batchValueByProduct = new Map<string, { value: number; qty: number; costSum: number }>();
+  for (const b of openBatches) {
+    const rem = Number(b.remainingQuantity);
+    const cpu = Number(b.costPerUnit);
+    const cur = batchValueByProduct.get(b.productId) ?? { value: 0, qty: 0, costSum: 0 };
+    cur.value += rem * cpu;
+    cur.qty += rem;
+    cur.costSum += rem * cpu;
+    batchValueByProduct.set(b.productId, cur);
+  }
 
   let totalValue = 0;
   let projectedProfit = 0;
@@ -267,19 +476,30 @@ export async function getInventorySummary(tenantId: string) {
   let out = 0;
 
   for (const p of products) {
-    const cost = p.costPrice ? Number(p.costPrice) : 0;
     const sell = Number(p.sellPrice);
     const qty = Number(p.stockQuantity);
-    totalValue += cost * qty;
-    projectedProfit += (sell - cost) * qty;
+    const batchAgg = p.trackType === 'BATCH' ? batchValueByProduct.get(p.id) : undefined;
+
+    if (batchAgg && batchAgg.qty > 0) {
+      const avgCost = batchAgg.costSum / batchAgg.qty;
+      totalValue += batchAgg.value;
+      projectedProfit += (sell - avgCost) * batchAgg.qty;
+    } else {
+      const cost = p.costPrice ? Number(p.costPrice) : 0;
+      totalValue += cost * qty;
+      projectedProfit += (sell - cost) * qty;
+    }
 
     if (!p.trackStock) {
       healthy++;
       continue;
     }
-    const threshold = p.lowStockThreshold ? Number(p.lowStockThreshold) : 0;
-    if (qty <= 0) out++;
-    else if (threshold > 0 && qty <= threshold) low++;
+    const level = stockLevelForProduct(
+      p,
+      p.trackType === 'BATCH' ? batchCounts.get(p.id) : undefined,
+    );
+    if (level === 'out') out++;
+    else if (level === 'low') low++;
     else healthy++;
   }
 
@@ -298,24 +518,49 @@ export async function getProductByBarcode(tenantId: string, barcode: string) {
     where: { tenantId, barcode, deletedAt: null, isActive: true },
     include: {
       category: { select: { id: true, name: true } },
+      part: { select: { id: true, name: true } },
       brand: { select: { id: true, name: true } },
       supplier: { select: { id: true, name: true } },
     },
   });
   if (!product) throw new NotFoundError('Product not found');
-  return serializeProduct(product);
+  return serializeProductWithBatchCount(tenantId, product);
+}
+
+async function assertBatchSellPrice(
+  trackType: string | undefined,
+  batchSellPrice: number | null | undefined,
+) {
+  if (trackType !== 'BATCH') return;
+  if (batchSellPrice == null || batchSellPrice < 0) {
+    throw new ValidationError('Whole batch price is required for batch products');
+  }
+}
+
+/** Ensures partId is null or belongs to this tenant (blocks cross-tenant linkage). */
+async function assertShopPartOwned(tenantId: string, partId: string | null | undefined) {
+  if (partId == null) return;
+  const part = await prisma.shopPart.findFirst({
+    where: { id: partId, tenantId, deletedAt: null },
+    select: { id: true },
+  });
+  if (!part) throw new NotFoundError('Shop part not found');
 }
 
 export async function createProduct(tenantId: string, input: z.infer<typeof productSchema>) {
   const name = input.name.trim();
   await assertUniqueCompactName('products', tenantId, name, 'product');
+  await assertBatchSellPrice(input.trackType, input.batchSellPrice ?? null);
+  await assertShopPartOwned(tenantId, input.partId);
 
   const product = await prisma.$transaction(async (tx) => {
+    const trackType = input.trackType ?? 'SIMPLE';
     const created = await tx.product.create({
       data: {
         tenantId,
         name,
         categoryId: input.categoryId ?? null,
+        partId: input.partId ?? null,
         brandId: input.brandId ?? null,
         supplierId: input.supplierId ?? null,
         sku: input.sku ?? null,
@@ -324,15 +569,20 @@ export async function createProduct(tenantId: string, input: z.infer<typeof prod
         unit: input.unit ?? 'piece',
         costPrice: input.costPrice != null ? toDecimal(input.costPrice) : null,
         sellPrice: toDecimal(input.sellPrice),
+        batchSellPrice:
+          trackType === 'BATCH' ? toDecimal(input.batchSellPrice!) : null,
         taxRate: toDecimal(input.taxRate ?? 0),
         lowStockThreshold:
           input.lowStockThreshold != null ? toDecimal(input.lowStockThreshold) : null,
         expiryDate: input.expiryDate ? new Date(input.expiryDate) : null,
         trackStock: input.trackStock ?? true,
+        trackType,
+        dispensingLossPercent: toDecimal(input.dispensingLossPercent ?? 0),
         isActive: input.isActive ?? true,
       },
       include: {
         category: { select: { id: true, name: true } },
+        part: { select: { id: true, name: true } },
         brand: { select: { id: true, name: true } },
         supplier: { select: { id: true, name: true } },
       },
@@ -340,7 +590,7 @@ export async function createProduct(tenantId: string, input: z.infer<typeof prod
     await syncInsert(tx, SYNC_TABLES.products, created);
     return created;
   });
-  return serializeProduct(product);
+  return serializeProductWithBatchCount(tenantId, product);
 }
 
 export async function updateProduct(
@@ -356,12 +606,24 @@ export async function updateProduct(
     await assertUniqueCompactName('products', tenantId, name, 'product', id);
   }
 
+  const nextTrackType = input.trackType ?? existing.trackType;
+  await assertBatchSellPrice(
+    nextTrackType,
+    input.batchSellPrice !== undefined
+      ? input.batchSellPrice
+      : existing.batchSellPrice?.toNumber() ?? null,
+  );
+  if (input.partId !== undefined) {
+    await assertShopPartOwned(tenantId, input.partId);
+  }
+
   const product = await prisma.$transaction(async (tx) => {
     const updated = await tx.product.update({
       where: { id },
       data: {
         name,
         categoryId: input.categoryId,
+        partId: input.partId,
         brandId: input.brandId,
         supplierId: input.supplierId,
         sku: input.sku,
@@ -370,6 +632,12 @@ export async function updateProduct(
         unit: input.unit,
         costPrice: input.costPrice != null ? toDecimal(input.costPrice) : undefined,
         sellPrice: input.sellPrice != null ? toDecimal(input.sellPrice) : undefined,
+        batchSellPrice:
+          input.batchSellPrice !== undefined
+            ? input.batchSellPrice != null
+              ? toDecimal(input.batchSellPrice)
+              : null
+            : undefined,
         taxRate: input.taxRate != null ? toDecimal(input.taxRate) : undefined,
         lowStockThreshold:
           input.lowStockThreshold != null ? toDecimal(input.lowStockThreshold) : undefined,
@@ -380,18 +648,25 @@ export async function updateProduct(
               : null
             : undefined,
         trackStock: input.trackStock,
+        trackType: input.trackType,
+        dispensingLossPercent:
+          input.dispensingLossPercent != null ? toDecimal(input.dispensingLossPercent) : undefined,
         isActive: input.isActive,
       },
       include: {
         category: { select: { id: true, name: true } },
+        part: { select: { id: true, name: true } },
         brand: { select: { id: true, name: true } },
         supplier: { select: { id: true, name: true } },
       },
     });
     await syncUpdate(tx, SYNC_TABLES.products, updated);
+    if (input.partId !== undefined && input.partId !== existing.partId) {
+      await backfillSaleItemsPartId(tx, tenantId, [id], input.partId ?? null);
+    }
     return updated;
   });
-  return serializeProduct(product);
+  return serializeProductWithBatchCount(tenantId, product);
 }
 
 export async function adjustStock(
@@ -405,6 +680,11 @@ export async function adjustStock(
       where: { id: productId, tenantId, deletedAt: null },
     });
     if (!product) throw new NotFoundError('Product not found');
+    if (product.trackType === 'BATCH') {
+      throw new ValidationError(
+        'Batch-tracked products use Receive batch for stock in, or Adjust on a batch for reconciliation.',
+      );
+    }
 
     const delta = toDecimal(input.quantityDelta);
     const newQty = product.stockQuantity.plus(delta);
@@ -453,25 +733,34 @@ export async function getMiscOpenProduct(tenantId: string) {
   return serializeProduct(product);
 }
 
-function serializeProduct(p: {
-  id: string;
-  name: string;
-  sku: string | null;
-  barcode: string | null;
-  imageUrl: string | null;
-  unit: string;
-  costPrice?: { toFixed: (n: number) => string } | null;
-  sellPrice: { toFixed: (n: number) => string };
-  stockQuantity: { toFixed: (n: number) => string };
-  lowStockThreshold: { toFixed: (n: number) => string } | null;
-  taxRate: { toFixed: (n: number) => string };
-  expiryDate?: Date | null;
-  trackStock: boolean;
-  isActive: boolean;
-  category: { id: string; name: string } | null;
-  brand?: { id: string; name: string } | null;
-  supplier?: { id: string; name: string } | null;
-}) {
+function serializeProduct(
+  p: {
+    id: string;
+    name: string;
+    sku: string | null;
+    barcode: string | null;
+    imageUrl: string | null;
+    unit: string;
+    costPrice?: { toFixed: (n: number) => string } | null;
+    sellPrice: { toFixed: (n: number) => string };
+    batchSellPrice?: { toFixed: (n: number) => string } | null;
+    stockQuantity: { toFixed: (n: number) => string };
+    lowStockThreshold: { toFixed: (n: number) => string } | null;
+    taxRate: { toFixed: (n: number) => string };
+    expiryDate?: Date | null;
+    trackStock: boolean;
+    trackType?: string;
+    dispensingLossPercent?: { toFixed: (n: number) => string };
+    isActive: boolean;
+    category: { id: string; name: string } | null;
+    part?: { id: string; name: string } | null;
+    brand?: { id: string; name: string } | null;
+    supplier?: { id: string; name: string } | null;
+  },
+  batchCounts?: BatchStockCounts,
+) {
+  const isBatch = p.trackType === 'BATCH';
+  const counts = batchCounts ?? { warehouse: 0, open: 0, total: 0 };
   return {
     id: p.id,
     name: p.name,
@@ -481,13 +770,20 @@ function serializeProduct(p: {
     unit: p.unit,
     costPrice: p.costPrice?.toFixed(2) ?? null,
     sellPrice: p.sellPrice.toFixed(2),
+    batchSellPrice: isBatch ? (p.batchSellPrice ?? p.sellPrice).toFixed(2) : null,
     stockQuantity: p.stockQuantity.toFixed(3),
+    batchStockCount: isBatch ? counts.total : null,
+    batchWarehouseCount: isBatch ? counts.warehouse : null,
+    batchOpenCount: isBatch ? counts.open : null,
     lowStockThreshold: p.lowStockThreshold?.toFixed(3) ?? null,
     taxRate: p.taxRate.toFixed(2),
     expiryDate: p.expiryDate?.toISOString().slice(0, 10) ?? null,
     trackStock: p.trackStock,
+    trackType: (p.trackType === 'BATCH' ? 'BATCH' : 'SIMPLE') as 'SIMPLE' | 'BATCH',
+    dispensingLossPercent: p.dispensingLossPercent?.toFixed(2) ?? '0.00',
     isActive: p.isActive,
     category: p.category,
+    part: p.part ?? null,
     brand: p.brand ?? null,
     supplier: p.supplier ?? null,
   };
@@ -505,8 +801,12 @@ export async function importProducts(
   tenantId: string,
   input: z.infer<typeof importProductsSchema>,
 ) {
-  const [categories, brands, suppliers, existingProducts] = await Promise.all([
+  const [categories, parts, brands, suppliers, existingProducts] = await Promise.all([
     prisma.category.findMany({
+      where: { tenantId, deletedAt: null },
+      select: { id: true, name: true },
+    }),
+    prisma.shopPart.findMany({
       where: { tenantId, deletedAt: null },
       select: { id: true, name: true },
     }),
@@ -525,6 +825,7 @@ export async function importProducts(
   ]);
 
   const categoryByName = buildNameIdMap(categories);
+  const partByName = buildNameIdMap(parts);
   const brandByName = buildNameIdMap(brands);
   const supplierByName = buildNameIdMap(suppliers);
   const byBarcode = new Map<string, string>();
@@ -549,6 +850,7 @@ export async function importProducts(
     const row = input.rows[i]!;
     try {
       const categoryId = resolveName(categoryByName, row.categoryName);
+      const partId = resolveName(partByName, row.partName);
       const brandId = resolveName(brandByName, row.brandName);
       const supplierId = resolveName(supplierByName, row.supplierName);
 
@@ -571,6 +873,7 @@ export async function importProducts(
           barcode: row.barcode ?? null,
           unit: row.unit ?? 'pcs',
           categoryId,
+          partId,
           brandId,
           supplierId,
           lowStockThreshold: row.lowStockThreshold ?? null,

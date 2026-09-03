@@ -1,4 +1,5 @@
 import { Input } from '@/components/ui/Input';
+import { MonthSelectDropdown } from '@/components/ui/MonthSelectDropdown';
 import { DATE_RANGE_BUTTONS, type DateRangeKey } from '@/lib/date-range';
 
 type Props = {
@@ -8,6 +9,8 @@ type Props = {
   customTo: string;
   onCustomFromChange: (value: string) => void;
   onCustomToChange: (value: string) => void;
+  selectedMonth: string;
+  onSelectedMonthChange: (monthKey: string) => void;
   from: string;
   to: string;
   className?: string;
@@ -20,6 +23,8 @@ export function DateRangeFilter({
   customTo,
   onCustomFromChange,
   onCustomToChange,
+  selectedMonth,
+  onSelectedMonthChange,
   from,
   to,
   className = '',
@@ -28,7 +33,7 @@ export function DateRangeFilter({
     <div
       className={`mb-4 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between ${className}`}
     >
-      <div className="inline-flex flex-wrap gap-1 rounded-xl border border-border bg-surface p-1">
+      <div className="inline-flex flex-wrap items-center gap-1 rounded-xl border border-border bg-surface p-1">
         {DATE_RANGE_BUTTONS.map((b) => (
           <button
             key={b.key}
@@ -43,6 +48,12 @@ export function DateRangeFilter({
             {b.label}
           </button>
         ))}
+        <MonthSelectDropdown
+          range={range}
+          selectedMonth={selectedMonth}
+          onSelectMonth={onSelectedMonthChange}
+          onRangeChange={onRangeChange}
+        />
       </div>
       {range === 'custom' ? (
         <div className="flex flex-wrap gap-2">

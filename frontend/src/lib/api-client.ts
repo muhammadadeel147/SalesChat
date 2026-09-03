@@ -19,9 +19,13 @@ import type {
   LoginResponse,
   Paginated,
   Product,
+  ProductBatch,
+  BatchSummary,
   SaleDetail,
   SaleListItem,
   SalesSummaryReport,
+  ShopPart,
+  ShopPartsSummaryReport,
   Supplier,
   SupplierLedgerEntry,
   SyncIssue,
@@ -53,6 +57,24 @@ export class ApiError extends Error {
     super(message);
     this.name = 'ApiError';
   }
+}
+
+/** Turn API validation details into a readable message for toasts/forms. */
+export function formatApiError(err: unknown, fallback = 'Request failed'): string {
+  if (!(err instanceof ApiError)) {
+    return err instanceof Error ? err.message : fallback;
+  }
+  const details = err.details as
+    | { fieldErrors?: Record<string, string[]>; formErrors?: string[] }
+    | undefined;
+  const fieldMsgs = details?.fieldErrors
+    ? Object.entries(details.fieldErrors).flatMap(([field, msgs]) =>
+        msgs.map((msg) => (field === '_errors' ? msg : `${field}: ${msg}`)),
+      )
+    : [];
+  if (fieldMsgs.length > 0) return fieldMsgs.join(' · ');
+  if (details?.formErrors?.length) return details.formErrors.join(' · ');
+  return err.message || fallback;
 }
 
 export function getStoredBranchId(): string | null {
@@ -266,6 +288,15 @@ export const api = {
       const q = params.toString();
       return apiRequest<SalesSummaryReport>(`/reports/sales-summary${q ? `?${q}` : ''}`);
     },
+    shopPartsSummary: (from?: string, to?: string, branchId?: string, partId?: string) => {
+      const params = new URLSearchParams();
+      if (from) params.set('from', from);
+      if (to) params.set('to', to);
+      if (branchId) params.set('branchId', branchId);
+      if (partId) params.set('partId', partId);
+      const q = params.toString();
+      return apiRequest<ShopPartsSummaryReport>(`/reports/shop-parts-summary${q ? `?${q}` : ''}`);
+    },
     salesTrend: (days = 14, branchId?: string) => {
       const params = new URLSearchParams({ days: String(days) });
       if (branchId) params.set('branchId', branchId);
@@ -296,6 +327,7 @@ export const api = {
     list: (opts?: {
       search?: string;
       categoryId?: string;
+      partId?: string;
       brandId?: string;
       stockStatus?: string;
       page?: number;
@@ -310,6 +342,7 @@ export const api = {
       });
       if (opts?.search) params.set('search', opts.search);
       if (opts?.categoryId) params.set('categoryId', opts.categoryId);
+      if (opts?.partId) params.set('partId', opts.partId);
       if (opts?.brandId) params.set('brandId', opts.brandId);
       if (opts?.stockStatus) params.set('stockStatus', opts.stockStatus);
       if (opts?.activeOnly) params.set('activeOnly', 'true');
@@ -318,6 +351,10 @@ export const api = {
       return apiRequest<Paginated<Product>>(`/products?${params}`);
     },
     summary: () => apiRequest<InventorySummary>('/products/summary'),
+    batchStockCounts: () =>
+      apiRequest<Record<string, { warehouse: number; open: number; total: number }>>(
+        '/products/batch-stock-counts',
+      ),
     byBarcode: (barcode: string) =>
       apiRequest<Product>(`/products/barcode/${encodeURIComponent(barcode)}`),
     miscOpen: () => apiRequest<Product>('/products/misc-open'),
@@ -330,6 +367,74 @@ export const api = {
         method: 'POST',
         body: JSON.stringify(body),
       }),
+    listBatches: (id: string, status?: 'WAREHOUSE' | 'OPEN' | 'CLOSED' | 'DAMAGED' | 'all') => {
+      const params = new URLSearchParams();
+      if (status) params.set('status', status);
+      const q = params.toString();
+      return apiRequest<ProductBatch[]>(`/products/${id}/batches${q ? `?${q}` : ''}`);
+    },
+    receiveBatch: (
+      id: string,
+      body: {
+        purchaseDate: string;
+        supplier?: string | null;
+        purchaseReference?: string | null;
+        costPerUnit?: number;
+        purchaseCostPerBatch?: number;
+        totalPurchaseCost?: number;
+        batchCount?: number;
+        quantityPerBatch?: number;
+        /** @deprecated use quantityPerBatch */
+        initialQuantity?: number;
+        notes?: string | null;
+      },
+    ) =>
+      apiRequest<{
+        batch: ProductBatch;
+        batches: ProductBatch[];
+        batchCount: number;
+        quantityPerBatch: string;
+        totalQuantity: string;
+        stockQuantity: string;
+      }>(`/products/${id}/batches`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    adjustBatch: (
+      batchId: string,
+      body: { remainingQuantity: number; reason: string; markDamaged?: boolean },
+    ) =>
+      apiRequest<{
+        batch: ProductBatch;
+        quantityDelta: string;
+        stockQuantity: string;
+      }>(`/batches/${batchId}/adjust`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    closeOutBatch: (batchId: string, body: { reason: string }) =>
+      apiRequest<{
+        batch: ProductBatch;
+        gasLossQuantity: string;
+        gasLossCost: string;
+        stockQuantity: string;
+        summary: BatchSummary;
+      }>(`/batches/${batchId}/close-out`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    openBatchForLoose: (batchId: string) =>
+      apiRequest<{ batch: ProductBatch }>(`/batches/${batchId}/open-for-loose`, {
+        method: 'POST',
+      }),
+    batchSummary: (batchId: string) =>
+      apiRequest<BatchSummary>(`/batches/${batchId}/summary`),
+    listOpenBatches: (productId?: string) => {
+      const params = new URLSearchParams();
+      if (productId) params.set('productId', productId);
+      const q = params.toString();
+      return apiRequest<ProductBatch[]>(`/batches${q ? `?${q}` : ''}`);
+    },
     delete: (id: string) =>
       apiRequest<{ success: boolean }>(`/products/${id}`, { method: 'DELETE' }),
     importCsv: (body: {
@@ -418,6 +523,26 @@ export const api = {
       apiRequest<Category>(`/categories/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
     delete: (id: string) =>
       apiRequest<{ success: boolean }>(`/categories/${id}`, { method: 'DELETE' }),
+  },
+
+  shopParts: {
+    list: (search?: string) => {
+      const params = new URLSearchParams();
+      if (search?.trim()) params.set('search', search.trim());
+      const q = params.toString();
+      return apiRequest<ShopPart[]>(`/shop-parts${q ? `?${q}` : ''}`);
+    },
+    create: (body: Record<string, unknown>) =>
+      apiRequest<ShopPart>('/shop-parts', { method: 'POST', body: JSON.stringify(body) }),
+    update: (id: string, body: Record<string, unknown>) =>
+      apiRequest<ShopPart>(`/shop-parts/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+    delete: (id: string) =>
+      apiRequest<{ success: boolean }>(`/shop-parts/${id}`, { method: 'DELETE' }),
+    bulkAssignProducts: (body: { productIds: string[]; partId: string | null }) =>
+      apiRequest<{ updated: number; partId: string | null }>('/products/bulk-assign-part', {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      }),
   },
 
   sales: {

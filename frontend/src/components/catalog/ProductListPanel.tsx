@@ -11,6 +11,7 @@ export function ProductListPanel({
   title,
   subtitle,
   categoryId,
+  partId,
   brandId,
   currency,
   onClose,
@@ -18,19 +19,21 @@ export function ProductListPanel({
   title: string;
   subtitle?: string;
   categoryId?: string;
+  partId?: string;
   brandId?: string;
   currency: string;
   onClose?: () => void;
 }) {
   const { data, isLoading, isFetching } = useQuery({
-    queryKey: ['products', 'catalog-panel', categoryId ?? 'all', brandId ?? 'all'],
+    queryKey: ['products', 'catalog-panel', categoryId ?? 'all', partId ?? 'all', brandId ?? 'all'],
     queryFn: () =>
       api.products.list({
         categoryId: categoryId || undefined,
+        partId: partId || undefined,
         brandId: brandId || undefined,
         pageSize: 200,
       }),
-    enabled: !!(categoryId || brandId),
+    enabled: !!(categoryId || partId || brandId),
     staleTime: 0,
     refetchOnMount: 'always',
   });

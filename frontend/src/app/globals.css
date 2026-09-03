@@ -136,6 +136,22 @@ body {
   }
 }
 
+@keyframes dropdown-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-dropdown-in {
+  animation: dropdown-in 0.18s ease-out forwards;
+  transform-origin: top center;
+}
+
 @keyframes float-soft {
   0%,
   100% {
@@ -197,7 +213,8 @@ body {
   .animate-ticker,
   .animate-shimmer,
   .animate-float-soft,
-  .animate-hub-pulse {
+  .animate-hub-pulse,
+  .animate-dropdown-in {
     animation: none;
   }
 

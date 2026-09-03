@@ -29,6 +29,8 @@ async function loadRow(
       return prisma.product.findFirst({ where: { id: recordId, tenantId } });
     case SYNC_TABLES.categories:
       return prisma.category.findFirst({ where: { id: recordId, tenantId } });
+    case SYNC_TABLES.shopParts:
+      return prisma.shopPart.findFirst({ where: { id: recordId, tenantId } });
     case SYNC_TABLES.customers:
       return prisma.customer.findFirst({ where: { id: recordId, tenantId } });
     case SYNC_TABLES.customerLedgerEntries:

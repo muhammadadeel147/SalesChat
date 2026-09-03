@@ -51,6 +51,9 @@ async function deleteLocalRecord(
     case SYNC_TABLES.categories:
       await tx.category.deleteMany({ where: { id: recordId, tenantId } });
       break;
+    case SYNC_TABLES.shopParts:
+      await tx.shopPart.deleteMany({ where: { id: recordId, tenantId } });
+      break;
     case SYNC_TABLES.customers:
       await tx.customer.deleteMany({ where: { id: recordId, tenantId } });
       break;

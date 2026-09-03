@@ -3,7 +3,7 @@ import { Prisma } from '@prisma/client';
 import { ConflictError } from './errors.js';
 import { prisma } from './prisma.js';
 
-export type NamedEntityTable = 'customers' | 'products' | 'categories' | 'brands' | 'suppliers';
+export type NamedEntityTable = 'customers' | 'products' | 'categories' | 'brands' | 'suppliers' | 'shop_parts';
 
 export type CompactExtraColumn = 'phone' | 'email' | 'sku' | 'barcode';
 
@@ -13,6 +13,7 @@ const TABLE_SQL: Record<NamedEntityTable, Prisma.Sql> = {
   categories: Prisma.raw('categories'),
   brands: Prisma.raw('brands'),
   suppliers: Prisma.raw('suppliers'),
+  shop_parts: Prisma.raw('shop_parts'),
 };
 
 const FAST_COMPACT_COLUMN: Record<'name' | CompactExtraColumn, Prisma.Sql> = {

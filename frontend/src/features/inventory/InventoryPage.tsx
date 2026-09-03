@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from '@/lib/next-nav';
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis } from 'recharts';
 
@@ -15,7 +15,7 @@ import { Pagination } from '@/components/ui/Pagination';
 import { Select } from '@/components/ui/Select';
 import { useToast } from '@/components/ui/Toast';
 import { IconBox } from '@/components/icons';
-import { api, ApiError } from '@/lib/api-client';
+import { api, ApiError, formatApiError } from '@/lib/api-client';
 import {
   CSV_IMPORT_MAX_BYTES,
   CSV_IMPORT_MAX_ROWS,
@@ -35,7 +35,8 @@ import { useAuth } from '@/lib/auth';
 import { formatMoney, todayIso } from '@/lib/format';
 import { useDebouncedValue } from '@/lib/use-debounced-value';
 import { productMatchesSearch } from '@/lib/search-match';
-import type { Product } from '@/types/api';
+import { formatProductStock, formatBatchProductPrice, getStockStatus } from '@/lib/sale-utils';
+import type { BatchSummary, Product, ProductBatch } from '@/types/api';
 
 const PAGE_SIZE = 20;
 const STOCK_FILTERS = new Set(['all', 'healthy', 'low', 'out']);
@@ -46,6 +47,18 @@ const PRODUCT_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 function parseStockParam(value: string | null): string {
   if (value && STOCK_FILTERS.has(value)) return value;
   return 'all';
+}
+
+function batchPurchaseTotal(batch: ProductBatch): number {
+  return parseFloat(batch.costPerUnit) * parseFloat(batch.initialQuantity);
+}
+
+function isWarehouseBatchStatus(status: ProductBatch['status']): boolean {
+  return status === 'WAREHOUSE';
+}
+
+function isCounterOpenBatchStatus(status: ProductBatch['status']): boolean {
+  return status === 'OPEN';
 }
 
 function daysAgoIso(days: number): string {
@@ -89,6 +102,66 @@ function MovementTooltip({
   );
 }
 
+function BatchProfitPanel({
+  summary,
+  currency,
+  unit,
+}: {
+  summary: BatchSummary;
+  currency: string;
+  unit: string;
+}) {
+  const profit = parseFloat(summary.netProfit);
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div>
+        <p className="text-[10px] uppercase text-text-muted">
+          {summary.isFinal ? 'Final profit' : 'Est. profit'}
+        </p>
+        <p
+          className={`text-lg font-bold tabular-nums ${profit >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}
+        >
+          {formatMoney(summary.netProfit, currency)}
+        </p>
+        {!summary.isFinal && (
+          <p className="text-[10px] text-text-muted">Pending cylinder close-out</p>
+        )}
+      </div>
+      <div>
+        <p className="text-[10px] uppercase text-text-muted">Revenue · {summary.saleCount} charges</p>
+        <p className="font-semibold tabular-nums">{formatMoney(summary.revenue, currency)}</p>
+        <p className="text-[10px] text-text-muted">
+          COGS sold: {formatMoney(summary.cogsSold, currency)}
+        </p>
+      </div>
+      <div>
+        <p className="text-[10px] uppercase text-text-muted">
+          {summary.isFinal ? 'Gas loss (written off)' : 'Est. gas loss (remaining)'}
+        </p>
+        <p className="font-semibold tabular-nums">
+          {summary.gasLossQuantity} {unit}
+        </p>
+        <p className="text-[10px] text-text-muted">
+          {formatMoney(summary.gasLossCost, currency)} · {summary.effectiveLossPercent}% of cylinder
+        </p>
+      </div>
+      <div>
+        <p className="text-[10px] uppercase text-text-muted">Avg loss / charge</p>
+        <p className="font-semibold tabular-nums">
+          {summary.avgLossPerCharge != null
+            ? `${summary.avgLossPerCharge} ${unit}`
+            : summary.saleCount > 0
+              ? 'Final after close'
+              : '—'}
+        </p>
+        <p className="text-[10px] text-text-muted">
+          Purchase cost: {formatMoney(summary.purchaseCost, currency)}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export function InventoryPage() {
   const { user } = useAuth();
   const toast = useToast();
@@ -99,9 +172,16 @@ export function InventoryPage() {
   const [stockStatus, setStockStatus] = useState(() => parseStockParam(searchParams.get('stock')));
   const [page, setPage] = useState(1);
   const [categoryFilter, setCategoryFilter] = useState('');
-  const [modal, setModal] = useState<'create' | 'edit' | 'stock' | null>(null);
+  const [partFilter, setPartFilter] = useState('');
+  const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(new Set());
+  const [bulkAssignOpen, setBulkAssignOpen] = useState(false);
+  const [bulkAssignPartId, setBulkAssignPartId] = useState('');
+  const [modal, setModal] = useState<
+    'create' | 'edit' | 'stock' | 'receive' | 'batches' | 'adjust-batch' | 'close-batch' | null
+  >(null);
   const [deleteTarget, setDeleteTarget] = useState<Product | null>(null);
   const [selected, setSelected] = useState<Product | null>(null);
+  const [adjustTarget, setAdjustTarget] = useState<ProductBatch | null>(null);
   const [form, setForm] = useState({
     name: '',
     sellPrice: '',
@@ -111,14 +191,43 @@ export function InventoryPage() {
     imageUrl: '',
     unit: 'pcs',
     categoryId: '',
+    partId: '',
     brandId: '',
     supplierId: '',
     expiryDate: '',
     trackStock: true,
+    trackType: 'SIMPLE' as 'SIMPLE' | 'BATCH',
+    batchSellPrice: '',
+    dispensingLossPercent: '0',
     lowStockThreshold: '',
   });
   const [formErrorVisible, setFormErrorVisible] = useState(false);
   const [stockDelta, setStockDelta] = useState('');
+  const [batchForm, setBatchForm] = useState({
+    purchaseDate: todayIso(),
+    supplier: '',
+    purchaseReference: '',
+    purchaseCostPerBatch: '',
+    batchCount: '1',
+    quantityPerBatch: '',
+    notes: '',
+    qtyEstimated: false,
+  });
+  const [adjustForm, setAdjustForm] = useState({
+    remainingQuantity: '',
+    reason: '',
+    markDamaged: false,
+  });
+  const [productBatches, setProductBatches] = useState<ProductBatch[]>([]);
+  const [batchSummaries, setBatchSummaries] = useState<Record<string, BatchSummary>>({});
+  const [expandedBatchId, setExpandedBatchId] = useState<string | null>(null);
+  const [expandedBatchSection, setExpandedBatchSection] = useState<'warehouse' | 'open' | null>(
+    null,
+  );
+  const [closeOutTarget, setCloseOutTarget] = useState<ProductBatch | null>(null);
+  const [closeOutReason, setCloseOutReason] = useState('');
+  const [batchesLoading, setBatchesLoading] = useState(false);
+  const [receiveFormError, setReceiveFormError] = useState('');
   const [importOpen, setImportOpen] = useState(false);
   const [importPreview, setImportPreview] = useState<{ count: number; errors: string[] } | null>(
     null,
@@ -140,6 +249,7 @@ export function InventoryPage() {
   const canEdit = hasFeature(user, FEATURES.INVENTORY_EDIT);
   const canAdjust = hasFeature(user, FEATURES.INVENTORY_STOCK_ADJUST);
   const canUseProductImages = hasFeature(user, FEATURES.INVENTORY_PRODUCT_IMAGES);
+  const canUseShopParts = hasFeature(user, FEATURES.INVENTORY_SHOP_PARTS);
 
   useEffect(() => {
     const next = parseStockParam(searchParams.get('stock'));
@@ -172,6 +282,11 @@ export function InventoryPage() {
     queryFn: () => api.categories.list(),
     enabled: hasFeature(user, FEATURES.INVENTORY_CATEGORIES),
   });
+  const { data: shopParts } = useQuery({
+    queryKey: ['shop-parts'],
+    queryFn: () => api.shopParts.list(),
+    enabled: canUseShopParts,
+  });
   const { data: brands } = useQuery({
     queryKey: ['brands'],
     queryFn: () => api.brands.list(),
@@ -184,12 +299,13 @@ export function InventoryPage() {
   });
 
   const { data, isLoading, isFetching } = useQuery({
-    queryKey: ['products', 'inventory', debouncedSearch, stockStatus, categoryFilter, page],
+    queryKey: ['products', 'inventory', debouncedSearch, stockStatus, categoryFilter, partFilter, page],
     queryFn: () =>
       api.products.list({
         search: debouncedSearch.trim() || undefined,
         stockStatus: stockStatus === 'all' ? undefined : stockStatus,
         categoryId: categoryFilter.trim() || undefined,
+        partId: partFilter.trim() || undefined,
         page,
         pageSize: PAGE_SIZE,
       }),
@@ -198,12 +314,25 @@ export function InventoryPage() {
     placeholderData: (prev) => prev,
   });
 
+  const { data: batchStockCounts } = useQuery({
+    queryKey: ['batch-stock-counts'],
+    queryFn: () => api.products.batchStockCounts(),
+    staleTime: 30_000,
+  });
+
   // Heavy full-catalog aggregate — load after the product list paints.
   const { data: summary } = useQuery({
     queryKey: ['inventory-summary'],
     queryFn: () => api.products.summary(),
     enabled: Boolean(data),
     staleTime: 60_000,
+  });
+
+  const { data: openBatchRows } = useQuery({
+    queryKey: ['batches', 'open'],
+    queryFn: () => api.products.listOpenBatches(),
+    enabled: Boolean(data),
+    staleTime: 30_000,
   });
 
   const movementFrom = daysAgoIso(MOVEMENT_DAYS - 1);
@@ -256,16 +385,40 @@ export function InventoryPage() {
 
   const displayedProducts = useMemo(() => {
     const rows = data?.data ?? [];
+    const withBatchCounts = rows.map((p) => {
+      if (p.trackType !== 'BATCH') return p;
+      const counts = batchStockCounts?.[p.id];
+      if (!counts) return p;
+      return {
+        ...p,
+        batchWarehouseCount: counts.warehouse,
+        batchOpenCount: counts.open,
+        batchStockCount: counts.total,
+      };
+    });
     const q = search.trim();
-    if (!q) return rows;
-    return rows.filter((p) => productMatchesSearch(p, q));
-  }, [data?.data, search]);
+    if (!q) return withBatchCounts;
+    return withBatchCounts.filter((p) => productMatchesSearch(p, q));
+  }, [data?.data, search, batchStockCounts]);
+  const warehouseProductBatches = useMemo(
+    () => productBatches.filter((b) => isWarehouseBatchStatus(b.status)),
+    [productBatches],
+  );
+  const openCounterBatches = useMemo(
+    () => productBatches.filter((b) => isCounterOpenBatchStatus(b.status)),
+    [productBatches],
+  );
   const meta = data?.meta;
   const listLoading = isLoading || (isFetching && !data);
 
   useEffect(() => {
     setPage(1);
-  }, [debouncedSearch, categoryFilter]);
+  }, [debouncedSearch, categoryFilter, partFilter]);
+
+  useEffect(() => {
+    setSelectedProductIds(new Set());
+  }, [debouncedSearch, categoryFilter, partFilter, page]);
+
 
   const deleteProduct = useMutation({
     mutationFn: (id: string) => api.products.delete(id),
@@ -280,16 +433,29 @@ export function InventoryPage() {
       const body = {
         name: form.name,
         sellPrice: parseFloat(form.sellPrice),
-        costPrice: form.costPrice ? parseFloat(form.costPrice) : null,
+        batchSellPrice:
+          form.trackType === 'BATCH' && form.batchSellPrice.trim()
+            ? parseFloat(form.batchSellPrice)
+            : null,
+        costPrice:
+          form.trackType === 'BATCH'
+            ? null
+            : form.costPrice
+              ? parseFloat(form.costPrice)
+              : null,
         barcode: form.barcode || null,
         sku: form.sku || null,
         ...(canUseProductImages ? { imageUrl: form.imageUrl || null } : {}),
         unit: form.unit,
         categoryId: form.categoryId || null,
+        partId: canUseShopParts ? form.partId || null : undefined,
         brandId: form.brandId || null,
         supplierId: form.supplierId || null,
         expiryDate: form.expiryDate || null,
         trackStock: form.trackStock,
+        trackType: form.trackType,
+        dispensingLossPercent:
+          form.trackType === 'BATCH' ? parseFloat(form.dispensingLossPercent || '0') : 0,
         lowStockThreshold: form.lowStockThreshold ? parseFloat(form.lowStockThreshold) : null,
       };
       return modal === 'edit' && selected
@@ -314,10 +480,352 @@ export function InventoryPage() {
     onSuccess: () => {
       setModal(null);
       void queryClient.invalidateQueries({ queryKey: ['products'] });
+      void queryClient.invalidateQueries({ queryKey: ['batch-stock-counts'] });
       void queryClient.invalidateQueries({ queryKey: ['inventory-summary'] });
       void queryClient.invalidateQueries({ queryKey: ['reports', 'stock'] });
     },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : 'Could not adjust stock');
+    },
   });
+
+  const receiveBatchMut = useMutation({
+    mutationFn: async () => {
+      const batchCount = Math.min(500, Math.max(1, Math.trunc(Number(batchForm.batchCount))));
+      const qtyPerBatch = parseFloat(batchForm.quantityPerBatch);
+      const costPerBatch = parseFloat(batchForm.purchaseCostPerBatch);
+      const baseNotes = batchForm.notes.trim();
+      const notes = batchForm.qtyEstimated
+        ? [
+            'Estimated qty per batch — correct with Adjust after weighing/measuring.',
+            baseNotes || null,
+          ]
+            .filter(Boolean)
+            .join(' ')
+        : baseNotes || null;
+
+      const singlePayload = {
+        purchaseDate: batchForm.purchaseDate,
+        supplier: batchForm.supplier.trim() || null,
+        purchaseReference: batchForm.purchaseReference.trim() || null,
+        quantityPerBatch: qtyPerBatch,
+        initialQuantity: qtyPerBatch,
+        purchaseCostPerBatch: costPerBatch,
+        totalPurchaseCost: costPerBatch,
+        costPerUnit: Math.round((costPerBatch / qtyPerBatch) * 10000) / 10000,
+        notes,
+      };
+
+      const productId = selected!.id;
+
+      if (batchCount === 1) {
+        const result = await api.products.receiveBatch(productId, {
+          ...singlePayload,
+          batchCount: 1,
+        });
+        return { ...result, batchCount: 1 };
+      }
+
+      // Try one bulk request (new backend creates all rows in one transaction).
+      try {
+        const bulk = await api.products.receiveBatch(productId, {
+          ...singlePayload,
+          batchCount,
+        });
+        const createdCount = bulk.batches?.length ?? bulk.batchCount ?? 0;
+        if (createdCount >= batchCount) {
+          return bulk;
+        }
+        // Old backend ignored batchCount — finish the rest one at a time.
+        let last = bulk;
+        for (let i = createdCount; i < batchCount; i++) {
+          last = await api.products.receiveBatch(productId, singlePayload);
+        }
+        return {
+          ...last,
+          batchCount,
+          totalQuantity: String(batchCount * qtyPerBatch),
+        };
+      } catch {
+        // Fallback: one API call per physical batch.
+        let last = await api.products.receiveBatch(productId, singlePayload);
+        for (let i = 1; i < batchCount; i++) {
+          last = await api.products.receiveBatch(productId, singlePayload);
+        }
+        return {
+          ...last,
+          batchCount,
+          totalQuantity: String(batchCount * qtyPerBatch),
+        };
+      }
+    },
+    onSuccess: (result) => {
+      setModal(null);
+      setReceiveFormError('');
+      const count = result.batchCount;
+      toast.success(
+        count > 1
+          ? `${count} batches received (${result.totalQuantity} ${selected?.unit ?? 'units'} total)`
+          : batchForm.qtyEstimated
+            ? 'Batch received (estimated). Adjust after you weigh/measure.'
+            : 'Batch received',
+      );
+      if (selected) {
+        queryClient.setQueriesData(
+          { queryKey: ['products'] },
+          (old: { data?: Product[]; meta?: unknown } | undefined) => {
+            if (!old?.data) return old;
+            return {
+              ...old,
+              data: old.data.map((p) =>
+                p.id === selected.id && p.trackType === 'BATCH'
+                  ? {
+                      ...p,
+                      batchWarehouseCount: (p.batchWarehouseCount ?? 0) + count,
+                      batchStockCount: (p.batchStockCount ?? 0) + count,
+                      stockQuantity: result.stockQuantity,
+                    }
+                  : p,
+              ),
+            };
+          },
+        );
+      }
+      void queryClient.invalidateQueries({ queryKey: ['products'] });
+      void queryClient.invalidateQueries({ queryKey: ['batch-stock-counts'] });
+      void queryClient.invalidateQueries({ queryKey: ['inventory-summary'] });
+      void queryClient.invalidateQueries({ queryKey: ['batches'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'stock'] });
+    },
+    onError: (err) => {
+      const message = formatApiError(err, 'Could not receive batch');
+      setReceiveFormError(message);
+      toast.error(message);
+    },
+  });
+
+  const refreshProductBatches = async (productId: string) => {
+    const rows = await api.products.listBatches(productId, 'all');
+    setProductBatches(rows);
+    return rows;
+  };
+
+  const loadBatchSummary = async (batchId: string) => {
+    if (batchSummaries[batchId]) return batchSummaries[batchId];
+    const summary = await api.products.batchSummary(batchId);
+    setBatchSummaries((prev) => ({ ...prev, [summary.batchId]: summary }));
+    return summary;
+  };
+
+  const toggleOpenBatchDetail = async (batchId: string) => {
+    if (expandedBatchId === batchId) {
+      setExpandedBatchId(null);
+      return;
+    }
+    setExpandedBatchId(batchId);
+    try {
+      await loadBatchSummary(batchId);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not load batch details');
+    }
+  };
+
+  const adjustBatchMut = useMutation({
+    mutationFn: () =>
+      api.products.adjustBatch(adjustTarget!.id, {
+        remainingQuantity: parseFloat(adjustForm.remainingQuantity),
+        reason: adjustForm.reason.trim(),
+        markDamaged: adjustForm.markDamaged || undefined,
+      }),
+    onSuccess: async () => {
+      toast.success('Batch adjusted');
+      setAdjustTarget(null);
+      void queryClient.invalidateQueries({ queryKey: ['products'] });
+      void queryClient.invalidateQueries({ queryKey: ['batch-stock-counts'] });
+      void queryClient.invalidateQueries({ queryKey: ['inventory-summary'] });
+      void queryClient.invalidateQueries({ queryKey: ['batches'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports', 'stock'] });
+      if (selected) {
+        setBatchesLoading(true);
+        try {
+          await refreshProductBatches(selected.id);
+          setModal('batches');
+        } catch {
+          setModal('batches');
+        } finally {
+          setBatchesLoading(false);
+        }
+      } else {
+        setModal(null);
+      }
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : 'Could not adjust batch');
+    },
+  });
+
+  const closeOutBatchMut = useMutation({
+    mutationFn: () =>
+      api.products.closeOutBatch(closeOutTarget!.id, { reason: closeOutReason.trim() }),
+    onSuccess: async (result) => {
+      toast.success('Cylinder closed — gas loss recorded');
+      setCloseOutTarget(null);
+      setCloseOutReason('');
+      setModal('batches');
+      setBatchSummaries((prev) => ({ ...prev, [result.summary.batchId]: result.summary }));
+      void queryClient.invalidateQueries({ queryKey: ['products'] });
+      void queryClient.invalidateQueries({ queryKey: ['batch-stock-counts'] });
+      void queryClient.invalidateQueries({ queryKey: ['inventory-summary'] });
+      void queryClient.invalidateQueries({ queryKey: ['batches'] });
+      void queryClient.invalidateQueries({ queryKey: ['reports'] });
+      if (selected) {
+        setBatchesLoading(true);
+        try {
+          await refreshProductBatches(selected.id);
+          setExpandedBatchId(result.batch.id);
+        } finally {
+          setBatchesLoading(false);
+        }
+      }
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : 'Could not close batch');
+    },
+  });
+
+  const openForLooseMut = useMutation({
+    mutationFn: (batchId: string) => api.products.openBatchForLoose(batchId),
+    onSuccess: async () => {
+      toast.success('Batch moved to open on counter');
+      void queryClient.invalidateQueries({ queryKey: ['products'] });
+      void queryClient.invalidateQueries({ queryKey: ['batches'] });
+      setExpandedBatchSection('open');
+      if (selected) {
+        setBatchesLoading(true);
+        try {
+          await refreshProductBatches(selected.id);
+        } finally {
+          setBatchesLoading(false);
+        }
+      }
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : 'Could not open batch for loose sales');
+    },
+  });
+
+  const openReceiveBatch = (p: Product) => {
+    setSelected(p);
+    setReceiveFormError('');
+    setBatchForm({
+      purchaseDate: todayIso(),
+      supplier: p.supplier?.name ?? '',
+      purchaseReference: '',
+      purchaseCostPerBatch: '',
+      batchCount: '1',
+      quantityPerBatch: '',
+      notes: '',
+      qtyEstimated: false,
+    });
+    setModal('receive');
+  };
+
+  const submitReceiveBatch = () => {
+    setReceiveFormError('');
+    const batchCount = Math.trunc(Number(batchForm.batchCount));
+    const qtyPerBatch = parseFloat(batchForm.quantityPerBatch);
+    const costPerBatch = parseFloat(batchForm.purchaseCostPerBatch);
+    if (!batchForm.purchaseDate) {
+      setReceiveFormError('Purchase date is required');
+      return;
+    }
+    if (!Number.isFinite(batchCount) || batchCount < 1 || !Number.isInteger(batchCount)) {
+      setReceiveFormError('Enter how many batches you are receiving (whole number)');
+      return;
+    }
+    if (batchCount > 500) {
+      setReceiveFormError('Cannot receive more than 500 batches at once');
+      return;
+    }
+    if (!Number.isFinite(qtyPerBatch) || qtyPerBatch <= 0) {
+      setReceiveFormError(`Enter how much ${selected?.unit ?? 'stock'} is in each batch`);
+      return;
+    }
+    if (!Number.isFinite(costPerBatch) || costPerBatch <= 0) {
+      setReceiveFormError('Enter what you paid for one batch');
+      return;
+    }
+    if (selected) {
+      const wholeSell = parseFloat(selected.batchSellPrice ?? selected.sellPrice);
+      if (Number.isFinite(wholeSell) && costPerBatch > wholeSell) {
+        setReceiveFormError(
+          `Purchase cost (${formatMoney(costPerBatch, currency)}) cannot exceed whole batch sell price (${formatMoney(wholeSell, currency)})`,
+        );
+        return;
+      }
+      const retail = parseFloat(selected.sellPrice);
+      const costPerUnit = costPerBatch / qtyPerBatch;
+      if (Number.isFinite(retail) && costPerUnit > retail) {
+        setReceiveFormError(
+          `Cost per ${selected.unit} (${formatMoney(costPerUnit, currency)}) exceeds retail rate (${formatMoney(retail, currency)})`,
+        );
+        return;
+      }
+    }
+    receiveBatchMut.mutate();
+  };
+
+  const receiveBatchCount = Number(batchForm.batchCount);
+  const receiveQtyPerBatch = parseFloat(batchForm.quantityPerBatch);
+  const receiveTotalQty =
+    Number.isFinite(receiveBatchCount) &&
+    receiveBatchCount > 0 &&
+    Number.isFinite(receiveQtyPerBatch) &&
+    receiveQtyPerBatch > 0
+      ? receiveBatchCount * receiveQtyPerBatch
+      : null;
+  const receiveTotalSpend =
+    receiveTotalQty != null &&
+    Number.isFinite(parseFloat(batchForm.purchaseCostPerBatch)) &&
+    parseFloat(batchForm.purchaseCostPerBatch) > 0
+      ? receiveBatchCount * parseFloat(batchForm.purchaseCostPerBatch)
+      : null;
+
+  const openBatches = async (p: Product) => {
+    setSelected(p);
+    setModal('batches');
+    setExpandedBatchId(null);
+    setExpandedBatchSection(null);
+    setBatchesLoading(true);
+    try {
+      const rows = await refreshProductBatches(p.id);
+      const warehouseCount = rows.filter((b) => b.status === 'WAREHOUSE').length;
+      const openCount = rows.filter((b) => b.status === 'OPEN').length;
+      setExpandedBatchSection(warehouseCount > 0 ? 'warehouse' : openCount > 0 ? 'open' : null);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not load batches');
+      setProductBatches([]);
+      setBatchSummaries({});
+    } finally {
+      setBatchesLoading(false);
+    }
+  };
+
+  const openCloseOutBatch = (b: ProductBatch) => {
+    setCloseOutTarget(b);
+    setCloseOutReason('');
+    setModal('close-batch');
+  };
+
+  const openAdjustBatch = (b: ProductBatch) => {
+    setAdjustTarget(b);
+    setAdjustForm({
+      remainingQuantity: b.remainingQuantity,
+      reason: '',
+      markDamaged: false,
+    });
+    setModal('adjust-batch');
+  };
 
   const importProducts = useMutation({
     mutationFn: () => api.products.importCsv({ rows: importRows, updateExisting: true }),
@@ -333,6 +841,7 @@ export function InventoryPage() {
       setImportMapping({});
       setImportUnmatched([]);
       void queryClient.invalidateQueries({ queryKey: ['products'] });
+      void queryClient.invalidateQueries({ queryKey: ['batch-stock-counts'] });
       void queryClient.invalidateQueries({ queryKey: ['inventory-summary'] });
     },
     onError: (err) => {
@@ -351,6 +860,7 @@ export function InventoryPage() {
     onSuccess: (result) => {
       setPurgeOpen(false);
       void queryClient.invalidateQueries({ queryKey: ['products'] });
+      void queryClient.invalidateQueries({ queryKey: ['batch-stock-counts'] });
       void queryClient.invalidateQueries({ queryKey: ['inventory-summary'] });
       setImportResult(`Removed ${result.deleted} product(s) from inventory.`);
     },
@@ -530,6 +1040,32 @@ export function InventoryPage() {
     (f) => importMapping[f.field] != null && importMapping[f.field]! >= 0,
   );
 
+  const bulkAssignPart = useMutation({
+    mutationFn: () =>
+      api.shopParts.bulkAssignProducts({
+        productIds: [...selectedProductIds],
+        partId: bulkAssignPartId || null,
+      }),
+    onSuccess: (result) => {
+      setBulkAssignOpen(false);
+      setSelectedProductIds(new Set());
+      toast.success(`${result.updated} product(s) assigned`);
+      void queryClient.invalidateQueries({ queryKey: ['products'] });
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : 'Could not assign products');
+    },
+  });
+
+  const toggleProductSelection = (id: string) => {
+    setSelectedProductIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
   const openCreate = () => {
     setForm({
       name: '',
@@ -540,10 +1076,14 @@ export function InventoryPage() {
       imageUrl: '',
       unit: 'pcs',
       categoryId: '',
+      partId: '',
       brandId: '',
       supplierId: '',
       expiryDate: '',
       trackStock: true,
+      trackType: 'SIMPLE',
+      batchSellPrice: '',
+      dispensingLossPercent: '0',
       lowStockThreshold: '',
     });
     setSelected(null);
@@ -556,16 +1096,20 @@ export function InventoryPage() {
     setForm({
       name: p.name,
       sellPrice: p.sellPrice,
+      batchSellPrice: p.batchSellPrice ?? p.sellPrice,
       costPrice: p.costPrice ?? '',
       barcode: p.barcode ?? '',
       sku: p.sku ?? '',
       imageUrl: canUseProductImages ? (p.imageUrl ?? '') : '',
       unit: p.unit,
       categoryId: p.category?.id ?? '',
+      partId: p.part?.id ?? '',
       brandId: p.brand?.id ?? '',
       supplierId: p.supplier?.id ?? '',
       expiryDate: p.expiryDate ?? '',
       trackStock: p.trackStock,
+      trackType: p.trackType ?? 'SIMPLE',
+      dispensingLossPercent: p.dispensingLossPercent ?? '0',
       lowStockThreshold: p.lowStockThreshold ?? '',
     });
     setFormErrorVisible(false);
@@ -575,26 +1119,42 @@ export function InventoryPage() {
   const currency = settings?.currency ?? 'PKR';
 
   const sellPriceNum = parseFloat(form.sellPrice);
+  const batchSellPriceNum = parseFloat(form.batchSellPrice);
   const costPriceNum = parseFloat(form.costPrice);
   const lowStockNum = parseFloat(form.lowStockThreshold);
+  const isBatchProduct = form.trackType === 'BATCH';
   const productFormErrors = {
     name: !form.name.trim() ? 'Name is required' : '',
     sellPrice:
       form.sellPrice.trim() === '' || !Number.isFinite(sellPriceNum) || sellPriceNum < 0
-        ? 'Sell price is required'
+        ? isBatchProduct
+          ? 'Retail rate is required'
+          : 'Sell price is required'
+        : '',
+    batchSellPrice:
+      isBatchProduct &&
+      (form.batchSellPrice.trim() === '' ||
+        !Number.isFinite(batchSellPriceNum) ||
+        batchSellPriceNum < 0)
+        ? 'Batch price is required'
         : '',
     costPrice:
-      form.costPrice.trim() === '' || !Number.isFinite(costPriceNum) || costPriceNum < 0
+      !isBatchProduct &&
+      (form.costPrice.trim() === '' || !Number.isFinite(costPriceNum) || costPriceNum < 0)
         ? 'Cost price is required'
         : '',
     lowStockThreshold:
-      form.lowStockThreshold.trim() === '' || !Number.isFinite(lowStockNum) || lowStockNum < 0
+      !isBatchProduct &&
+      (form.lowStockThreshold.trim() === '' ||
+        !Number.isFinite(lowStockNum) ||
+        lowStockNum < 0)
         ? 'Low stock threshold is required'
         : '',
   };
   const canSaveProduct =
     !productFormErrors.name &&
     !productFormErrors.sellPrice &&
+    !productFormErrors.batchSellPrice &&
     !productFormErrors.costPrice &&
     !productFormErrors.lowStockThreshold;
 
@@ -637,7 +1197,9 @@ export function InventoryPage() {
               <p className="mt-1 text-3xl font-black tracking-tight text-brand-900 tabular-nums sm:text-4xl">
                 {formatMoney(summary?.inventoryValue ?? '0', currency)}
               </p>
-              <p className="mt-1 text-sm text-text-muted">Cost price × quantity on hand</p>
+              <p className="mt-1 text-sm text-text-muted">
+                Cost × qty on hand (batch products use each open batch’s cost)
+              </p>
             </div>
           </div>
 
@@ -802,6 +1364,50 @@ export function InventoryPage() {
         </div>
       )}
 
+      {(openBatchRows?.length ?? 0) > 0 && (
+        <div className="mb-4 overflow-hidden rounded-2xl border border-border bg-surface shadow-[var(--shadow-card)]">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3">
+            <div>
+              <p className="text-sm font-semibold text-text">Open batches</p>
+              <p className="text-xs text-text-muted">
+                Remaining stock across cylinders/coils — {openBatchRows!.length} open
+              </p>
+            </div>
+          </div>
+          <div className="max-h-56 overflow-auto">
+            <table className="w-full min-w-[520px] text-left text-sm">
+              <thead className="sticky top-0 bg-surface-muted text-xs uppercase text-text-muted">
+                <tr>
+                  <th className="px-4 py-2 font-semibold">Product</th>
+                  <th className="px-4 py-2 font-semibold">Remaining</th>
+                  <th className="px-4 py-2 font-semibold">Paid</th>
+                  <th className="px-4 py-2 font-semibold">Purchased</th>
+                  <th className="px-4 py-2 font-semibold">Supplier</th>
+                </tr>
+              </thead>
+              <tbody>
+                {openBatchRows!.map((b) => (
+                  <tr key={b.id} className="border-t border-border/60">
+                    <td className="px-4 py-2 font-medium">{b.product?.name ?? '—'}</td>
+                    <td className="px-4 py-2 font-semibold tabular-nums">
+                      {b.remainingQuantity}
+                      <span className="ml-1 font-normal text-text-muted">
+                        {b.product?.unit ?? ''}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2 tabular-nums">
+                      {formatMoney(batchPurchaseTotal(b), currency)}
+                    </td>
+                    <td className="px-4 py-2 tabular-nums text-text-muted">{b.purchaseDate}</td>
+                    <td className="px-4 py-2 text-text-muted">{b.supplier || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-2">
         <input
           className="min-h-[44px] w-full min-w-0 flex-1 rounded-xl border border-border bg-white px-3 py-2 text-sm text-text placeholder:text-text-muted/60 focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 sm:min-w-[200px]"
@@ -839,7 +1445,39 @@ export function InventoryPage() {
             ))}
           </select>
         )}
+        {canUseShopParts && (
+          <select
+            className="min-h-[44px] w-full shrink-0 rounded-xl border border-border bg-white px-3 py-2 text-sm sm:w-auto sm:min-w-[160px]"
+            value={partFilter}
+            onChange={(e) => {
+              setPartFilter(e.target.value);
+              setPage(1);
+            }}
+          >
+            <option value="">All parts</option>
+            <option value="none">Unassigned</option>
+            {(shopParts ?? []).map((part) => (
+              <option key={part.id} value={part.id}>
+                {part.name}
+              </option>
+            ))}
+          </select>
+        )}
       </div>
+
+      {canUseShopParts && selectedProductIds.size > 0 && (
+        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-brand-200 bg-brand-50 px-3 py-2">
+          <span className="text-sm font-medium text-text">
+            {selectedProductIds.size} selected
+          </span>
+          <Button size="sm" onClick={() => setBulkAssignOpen(true)}>
+            Assign to part
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setSelectedProductIds(new Set())}>
+            Clear
+          </Button>
+        </div>
+      )}
 
       {displayedProducts.length === 0 ? (
         <EmptyState
@@ -860,9 +1498,27 @@ export function InventoryPage() {
                 className="rounded-2xl border border-border bg-surface p-4 shadow-[var(--shadow-card)]"
               >
                 <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <p className="font-semibold text-text">{p.name}</p>
-                    <p className="mt-0.5 text-xs text-text-muted">{p.barcode || p.sku || '—'}</p>
+                  <div className="flex min-w-0 items-start gap-3">
+                    {canUseShopParts && canEdit && (
+                      <input
+                        type="checkbox"
+                        className="mt-1"
+                        checked={selectedProductIds.has(p.id)}
+                        onChange={() => toggleProductSelection(p.id)}
+                      />
+                    )}
+                    <div className="min-w-0">
+                      <p className="font-semibold text-text">{p.name}</p>
+                      <p className="mt-0.5 text-xs text-text-muted">{p.barcode || p.sku || '—'}</p>
+                      {p.part?.name && (
+                        <p className="mt-0.5 text-xs text-brand-700">{p.part.name}</p>
+                      )}
+                      {p.trackType === 'BATCH' && (
+                        <Badge variant="default" className="mt-1">
+                          Batch · {p.unit}
+                        </Badge>
+                      )}
+                    </div>
                   </div>
                   <Badge variant={p.isActive ? 'success' : 'default'}>
                     {p.isActive ? 'Active' : 'Inactive'}
@@ -871,20 +1527,25 @@ export function InventoryPage() {
                 <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-sm">
                   <p>
                     <span className="text-text-muted">Price </span>
-                    <span className="font-semibold">{formatMoney(p.sellPrice, currency)}</span>
+                    {p.trackType === 'BATCH' ? (
+                      <span className="block font-semibold">
+                        {formatBatchProductPrice(p, currency, formatMoney).perUnit}
+                        <span className="mt-0.5 block text-xs font-normal text-text-muted">
+                          Whole {formatBatchProductPrice(p, currency, formatMoney).wholeBatch}
+                        </span>
+                      </span>
+                    ) : (
+                      <span className="font-semibold">{formatMoney(p.sellPrice, currency)}</span>
+                    )}
                   </p>
                   <p>
                     <span className="text-text-muted">Stock </span>
                     <span
                       className={
-                        p.trackStock &&
-                        p.lowStockThreshold &&
-                        parseFloat(p.stockQuantity) <= parseFloat(p.lowStockThreshold)
-                          ? 'font-semibold text-warning'
-                          : 'font-semibold'
+                        getStockStatus(p) === 'low' ? 'font-semibold text-warning' : 'font-semibold'
                       }
                     >
-                      {p.trackStock ? p.stockQuantity : '—'}
+                      {formatProductStock(p)}
                     </span>
                   </p>
                 </div>
@@ -904,7 +1565,7 @@ export function InventoryPage() {
                       </Button>
                     </>
                   )}
-                  {canAdjust && p.trackStock && (
+                  {canAdjust && p.trackStock && p.trackType !== 'BATCH' && (
                     <Button
                       variant="ghost"
                       size="sm"
@@ -916,6 +1577,16 @@ export function InventoryPage() {
                     >
                       Stock
                     </Button>
+                  )}
+                  {canAdjust && p.trackStock && p.trackType === 'BATCH' && (
+                    <>
+                      <Button variant="ghost" size="sm" onClick={() => openReceiveBatch(p)}>
+                        Receive batch
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => void openBatches(p)}>
+                        Batches
+                      </Button>
+                    </>
                   )}
                 </div>
               </div>
@@ -930,9 +1601,11 @@ export function InventoryPage() {
               <table className="w-full min-w-[640px] text-sm">
                 <thead>
                   <tr className="border-b border-border bg-surface-muted text-left text-xs font-semibold uppercase tracking-wide text-text-muted">
+                    {canUseShopParts && canEdit && <th className="px-4 py-3 w-10" />}
                     <th className="px-4 py-3">Product</th>
                     <th className="px-4 py-3">Price</th>
                     <th className="px-4 py-3">Stock</th>
+                    {canUseShopParts && <th className="px-4 py-3">Part</th>}
                     <th className="px-4 py-3">Status</th>
                     <th className="px-4 py-3" />
                   </tr>
@@ -940,29 +1613,49 @@ export function InventoryPage() {
                 <tbody>
                   {displayedProducts.map((p) => (
                     <tr key={p.id} className="border-b border-border/60 hover:bg-brand-50/30">
+                      {canUseShopParts && canEdit && (
+                        <td className="px-4 py-3">
+                          <input
+                            type="checkbox"
+                            checked={selectedProductIds.has(p.id)}
+                            onChange={() => toggleProductSelection(p.id)}
+                          />
+                        </td>
+                      )}
                       <td className="px-4 py-3">
                         <p className="font-medium text-text">{p.name}</p>
                         <p className="text-xs text-text-muted">{p.barcode || p.sku || '—'}</p>
                       </td>
-                      <td className="px-4 py-3 font-semibold">
-                        {formatMoney(p.sellPrice, currency)}
+                      <td className="px-4 py-3">
+                        {p.trackType === 'BATCH' ? (
+                          <div>
+                            <p className="font-semibold">
+                              {formatBatchProductPrice(p, currency, formatMoney).perUnit}
+                            </p>
+                            <p className="text-xs font-normal text-text-muted">
+                              Whole {formatBatchProductPrice(p, currency, formatMoney).wholeBatch}
+                            </p>
+                          </div>
+                        ) : (
+                          <span className="font-semibold">{formatMoney(p.sellPrice, currency)}</span>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         {p.trackStock ? (
                           <span
                             className={
-                              p.lowStockThreshold &&
-                              parseFloat(p.stockQuantity) <= parseFloat(p.lowStockThreshold)
-                                ? 'text-warning font-semibold'
-                                : ''
+                              getStockStatus(p) === 'low' ? 'text-warning font-semibold' : ''
                             }
                           >
-                            {p.stockQuantity}
+                            {formatProductStock(p)}
                           </span>
                         ) : (
                           '—'
                         )}
                       </td>
+                      {canUseShopParts && (
+                        <td className="px-4 py-3 text-text-muted">{p.part?.name ?? '—'}</td>
+                      )}
                       <td className="px-4 py-3">
                         <Badge variant={p.isActive ? 'success' : 'default'}>
                           {p.isActive ? 'Active' : 'Inactive'}
@@ -984,7 +1677,7 @@ export function InventoryPage() {
                             </Button>
                           </>
                         )}
-                        {canAdjust && p.trackStock && (
+                        {canAdjust && p.trackStock && p.trackType !== 'BATCH' && (
                           <Button
                             variant="ghost"
                             size="sm"
@@ -996,6 +1689,20 @@ export function InventoryPage() {
                           >
                             Stock
                           </Button>
+                        )}
+                        {canAdjust && p.trackStock && p.trackType === 'BATCH' && (
+                          <>
+                            <Button variant="ghost" size="sm" onClick={() => openReceiveBatch(p)}>
+                              Receive
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => void openBatches(p)}
+                            >
+                              Batches
+                            </Button>
+                          </>
                         )}
                       </td>
                     </tr>
@@ -1076,22 +1783,71 @@ export function InventoryPage() {
             required
             error={formErrorVisible ? productFormErrors.name || undefined : undefined}
           />
-          <Input
-            label="Sell price"
-            type="number"
-            value={form.sellPrice}
-            onChange={(e) => setForm({ ...form, sellPrice: e.target.value })}
-            required
-            error={formErrorVisible ? productFormErrors.sellPrice || undefined : undefined}
+          <Select
+            label="Track type"
+            value={form.trackType}
+            onChange={(e) => {
+              const trackType = e.target.value as 'SIMPLE' | 'BATCH';
+              setForm({
+                ...form,
+                trackType,
+                batchSellPrice:
+                  trackType === 'BATCH' ? form.batchSellPrice || form.sellPrice : '',
+                costPrice: trackType === 'BATCH' ? '' : form.costPrice,
+              });
+            }}
+            options={[
+              { value: 'SIMPLE', label: 'Simple (spare parts)' },
+              { value: 'BATCH', label: 'Batch (gas / pipe / bulk)' },
+            ]}
           />
           <Input
-            label="Cost price"
-            type="number"
-            value={form.costPrice}
-            onChange={(e) => setForm({ ...form, costPrice: e.target.value })}
-            required
-            error={formErrorVisible ? productFormErrors.costPrice || undefined : undefined}
+            label="Unit"
+            value={form.unit}
+            onChange={(e) => setForm({ ...form, unit: e.target.value })}
+            hint="e.g. piece, kg, meter, feet"
           />
+          {form.trackType === 'BATCH' ? (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Input
+                label={`Retail rate (${currency} / ${form.unit || 'unit'})`}
+                type="number"
+                value={form.sellPrice}
+                onChange={(e) => setForm({ ...form, sellPrice: e.target.value })}
+                required
+                error={formErrorVisible ? productFormErrors.sellPrice || undefined : undefined}
+                hint="Loose sales — price per unit (e.g. 50 PKR per meter)"
+              />
+              <Input
+                label={`Whole batch price (${currency})`}
+                type="number"
+                value={form.batchSellPrice}
+                onChange={(e) => setForm({ ...form, batchSellPrice: e.target.value })}
+                required
+                error={formErrorVisible ? productFormErrors.batchSellPrice || undefined : undefined}
+                hint="Fixed price for selling the entire batch (e.g. 3000 PKR for the full coil)"
+              />
+            </div>
+          ) : (
+            <>
+              <Input
+                label="Sell price"
+                type="number"
+                value={form.sellPrice}
+                onChange={(e) => setForm({ ...form, sellPrice: e.target.value })}
+                required
+                error={formErrorVisible ? productFormErrors.sellPrice || undefined : undefined}
+              />
+              <Input
+                label="Cost price"
+                type="number"
+                value={form.costPrice}
+                onChange={(e) => setForm({ ...form, costPrice: e.target.value })}
+                required
+                error={formErrorVisible ? productFormErrors.costPrice || undefined : undefined}
+              />
+            </>
+          )}
           <Input
             label="Barcode"
             value={form.barcode}
@@ -1174,6 +1930,20 @@ export function InventoryPage() {
               ))}
             </select>
           )}
+          {canUseShopParts && (
+            <select
+              className="w-full rounded-xl border border-border px-3 py-2 text-sm"
+              value={form.partId}
+              onChange={(e) => setForm({ ...form, partId: e.target.value })}
+            >
+              <option value="">No shop part</option>
+              {(shopParts ?? []).map((part) => (
+                <option key={part.id} value={part.id}>
+                  {part.name}
+                </option>
+              ))}
+            </select>
+          )}
           {hasFeature(user, FEATURES.INVENTORY_BRANDS) && (
             <select
               className="w-full rounded-xl border border-border px-3 py-2 text-sm"
@@ -1202,11 +1972,6 @@ export function InventoryPage() {
               ))}
             </select>
           )}
-          <Input
-            label="Unit"
-            value={form.unit}
-            onChange={(e) => setForm({ ...form, unit: e.target.value })}
-          />
           <label className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"
@@ -1216,17 +1981,18 @@ export function InventoryPage() {
             Track stock
           </label>
           <Input
-            label="Low stock threshold"
+            label={isBatchProduct ? 'Low stock threshold (batches)' : 'Low stock threshold'}
             type="number"
             value={form.lowStockThreshold}
             onChange={(e) => setForm({ ...form, lowStockThreshold: e.target.value })}
-            required
+            required={!isBatchProduct}
+            hint={
+              isBatchProduct
+                ? 'Alert when available batch count falls below this (e.g. 2 batches left)'
+                : undefined
+            }
             error={formErrorVisible ? productFormErrors.lowStockThreshold || undefined : undefined}
           />
-          <p className="text-xs text-text-muted">
-            Required: name, sell price, cost price, and low stock threshold. Enter moves to the next
-            field; Enter on the last field saves.
-          </p>
         </form>
       </Modal>
 
@@ -1263,6 +2029,531 @@ export function InventoryPage() {
             hint="Press Enter to save"
           />
         </form>
+      </Modal>
+
+      <Modal
+        open={modal === 'receive'}
+        onClose={() => {
+          setModal(null);
+          setReceiveFormError('');
+        }}
+        title={`Receive batch — ${selected?.name}`}
+        footer={
+          <>
+            <Button variant="ghost" type="button" onClick={() => setModal(null)}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              loading={receiveBatchMut.isPending}
+              onClick={submitReceiveBatch}
+            >
+              {receiveBatchMut.isPending && Number(batchForm.batchCount) > 1
+                ? 'Receiving…'
+                : 'Receive'}
+            </Button>
+          </>
+        }
+      >
+        <form
+          id="inventory-receive-batch-form"
+          className="space-y-3"
+          noValidate
+          onSubmit={(e) => {
+            e.preventDefault();
+            submitReceiveBatch();
+          }}
+        >
+          {receiveFormError ? (
+            <p className="rounded-lg border border-danger/30 bg-danger/5 px-3 py-2 text-sm text-danger">
+              {receiveFormError}
+            </p>
+          ) : null}
+          {selected && (
+            <p className="text-sm text-text-muted">
+              Retail {formatMoney(selected.sellPrice, currency)}/{selected.unit} · Whole batch{' '}
+              {formatMoney(selected.batchSellPrice ?? '0', currency)}
+            </p>
+          )}
+          <Input
+            label="Purchase date"
+            type="date"
+            value={batchForm.purchaseDate}
+            onChange={(e) => setBatchForm({ ...batchForm, purchaseDate: e.target.value })}
+            required
+          />
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <Input
+              label="Number of batches"
+              type="number"
+              step="1"
+              min="1"
+              value={batchForm.batchCount}
+              onChange={(e) => setBatchForm({ ...batchForm, batchCount: e.target.value })}
+              required
+              hint="How many coils/cylinders you received"
+            />
+            <Input
+              label={`Quantity per batch (${selected?.unit ?? 'units'})`}
+              type="number"
+              step="0.001"
+              min="0.001"
+              value={batchForm.quantityPerBatch}
+              onChange={(e) => setBatchForm({ ...batchForm, quantityPerBatch: e.target.value })}
+              required
+              hint={`${selected?.unit ?? 'Units'} inside each batch`}
+            />
+          </div>
+          {receiveTotalQty != null && (
+            <p className="rounded-lg border border-border bg-surface-muted/60 px-3 py-2 text-sm text-text-muted">
+              Receiving{' '}
+              <span className="font-semibold text-text">
+                {receiveBatchCount} batch{receiveBatchCount === 1 ? '' : 'es'} × {receiveQtyPerBatch}{' '}
+                {selected?.unit ?? 'units'}
+              </span>{' '}
+              ={' '}
+              <span className="font-semibold text-text">
+                {receiveTotalQty} {selected?.unit ?? 'units'} total
+              </span>
+            </p>
+          )}
+          <Input
+            label={`Purchase cost per batch (${currency})`}
+            type="number"
+            step="0.01"
+            min="0.01"
+            value={batchForm.purchaseCostPerBatch}
+            onChange={(e) =>
+              setBatchForm({ ...batchForm, purchaseCostPerBatch: e.target.value })
+            }
+            required
+            hint="What you paid for one coil/cylinder — same price for each batch"
+          />
+          {receiveTotalSpend != null && receiveBatchCount > 1 && (
+            <p className="text-xs text-text-muted">
+              Total paid: {formatMoney(receiveTotalSpend, currency)} ({receiveBatchCount} ×{' '}
+              {formatMoney(batchForm.purchaseCostPerBatch, currency)})
+            </p>
+          )}
+          <Input
+            label="Supplier"
+            value={batchForm.supplier}
+            onChange={(e) => setBatchForm({ ...batchForm, supplier: e.target.value })}
+          />
+          <Input
+            label="Purchase reference"
+            value={batchForm.purchaseReference}
+            onChange={(e) => setBatchForm({ ...batchForm, purchaseReference: e.target.value })}
+            hint="Invoice / delivery note #"
+          />
+          <Input
+            label="Notes"
+            value={batchForm.notes}
+            onChange={(e) => setBatchForm({ ...batchForm, notes: e.target.value })}
+          />
+          <label className="flex items-start gap-2 text-sm text-text-muted">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={batchForm.qtyEstimated}
+              onChange={(e) => setBatchForm({ ...batchForm, qtyEstimated: e.target.checked })}
+            />
+            <span>Quantity per batch is an estimate — adjust later after weighing</span>
+          </label>
+        </form>
+      </Modal>
+
+      <Modal
+        open={modal === 'batches'}
+        onClose={() => setModal(null)}
+        title={`Batches — ${selected?.name}`}
+        size="lg"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setModal(null)}>
+              Close
+            </Button>
+            {canAdjust && selected && (
+              <Button
+                onClick={() => {
+                  if (selected) openReceiveBatch(selected);
+                }}
+              >
+                Receive batch
+              </Button>
+            )}
+          </>
+        }
+      >
+        {batchesLoading ? (
+          <PageSkeleton rows={4} />
+        ) : productBatches.length === 0 ? (
+          <EmptyState
+            title="No batches yet"
+            description="Receive a cylinder or coil to start tracking this product by batch."
+          />
+        ) : (
+          <div className="space-y-3">
+            <button
+              type="button"
+              className={`flex w-full items-center justify-between rounded-xl border px-4 py-3 text-left transition-colors ${
+                expandedBatchSection === 'warehouse'
+                  ? 'border-brand-300 bg-brand-50'
+                  : 'border-border bg-surface hover:bg-surface-muted/50'
+              }`}
+              onClick={() =>
+                setExpandedBatchSection((prev) => (prev === 'warehouse' ? null : 'warehouse'))
+              }
+            >
+              <div>
+                <p className="font-semibold text-text">In stock</p>
+                <p className="text-xs text-text-muted">
+                  Received — not opened yet. Tap to open on counter when ready.
+                </p>
+              </div>
+              <span className="text-2xl font-bold tabular-nums text-brand-700">
+                {warehouseProductBatches.length}
+              </span>
+            </button>
+
+            {expandedBatchSection === 'warehouse' && (
+              <div className="overflow-x-auto rounded-xl border border-border">
+                {warehouseProductBatches.length === 0 ? (
+                  <p className="px-4 py-3 text-sm text-text-muted">No batches in stock.</p>
+                ) : (
+                  <table className="w-full min-w-[520px] text-left text-sm">
+                    <thead className="border-b border-border bg-surface-muted/40 text-xs uppercase text-text-muted">
+                      <tr>
+                        <th className="px-2 py-2 font-semibold">Purchased</th>
+                        <th className="px-2 py-2 font-semibold">Remaining</th>
+                        <th className="px-2 py-2 font-semibold">Paid</th>
+                        <th className="px-2 py-2 font-semibold">Supplier</th>
+                        {canAdjust && <th className="px-2 py-2 font-semibold"> </th>}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {warehouseProductBatches.map((b) => {
+                        const summary = batchSummaries[b.id];
+                        const expanded = expandedBatchId === b.id;
+                        return (
+                          <Fragment key={b.id}>
+                            <tr className="border-b border-border/60">
+                              <td className="px-2 py-2 tabular-nums">{b.purchaseDate}</td>
+                              <td className="px-2 py-2 font-semibold tabular-nums">
+                                {b.remainingQuantity}
+                                <span className="ml-1 font-normal text-text-muted">
+                                  / {b.initialQuantity} {selected?.unit}
+                                </span>
+                              </td>
+                              <td className="px-2 py-2 tabular-nums">
+                                {formatMoney(batchPurchaseTotal(b), currency)}
+                              </td>
+                              <td className="px-2 py-2 text-text-muted">
+                                {b.supplier || b.purchaseReference || '—'}
+                              </td>
+                              {canAdjust && (
+                                <td className="px-2 py-2 text-right">
+                                  <div className="flex flex-wrap items-center justify-end gap-1">
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => void toggleOpenBatchDetail(b.id)}
+                                    >
+                                      {expanded ? 'Hide' : 'Details'}
+                                    </Button>
+                                    {parseFloat(b.remainingQuantity) > 0 && (
+                                      <Button
+                                        variant="secondary"
+                                        size="sm"
+                                        loading={openForLooseMut.isPending}
+                                        onClick={() => openForLooseMut.mutate(b.id)}
+                                      >
+                                        Open on counter
+                                      </Button>
+                                    )}
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => openAdjustBatch(b)}
+                                    >
+                                      Adjust
+                                    </Button>
+                                  </div>
+                                </td>
+                              )}
+                            </tr>
+                            {expanded && summary && (
+                              <tr className="border-b border-border/60 bg-surface-muted/40">
+                                <td colSpan={canAdjust ? 5 : 4} className="px-4 py-3">
+                                  <BatchProfitPanel
+                                    summary={summary}
+                                    currency={currency}
+                                    unit={selected?.unit ?? summary.unit}
+                                  />
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            )}
+
+            <button
+              type="button"
+              className={`flex w-full items-center justify-between rounded-xl border px-4 py-3 text-left transition-colors ${
+                expandedBatchSection === 'open'
+                  ? 'border-emerald-300 bg-emerald-50'
+                  : 'border-border bg-surface hover:bg-surface-muted/50'
+              }`}
+              onClick={() =>
+                setExpandedBatchSection((prev) => (prev === 'open' ? null : 'open'))
+              }
+            >
+              <div>
+                <p className="font-semibold text-text">Open on counter</p>
+                <p className="text-xs text-text-muted">Opened for loose sales — tap for details</p>
+              </div>
+              <span className="text-2xl font-bold tabular-nums text-emerald-700">
+                {openCounterBatches.length}
+              </span>
+            </button>
+
+            {expandedBatchSection === 'open' && (
+              <div className="overflow-x-auto rounded-xl border border-border">
+                {openCounterBatches.length === 0 ? (
+                  <p className="px-4 py-3 text-sm text-text-muted">No batches open on counter.</p>
+                ) : (
+                  <table className="w-full min-w-[520px] text-left text-sm">
+                    <thead className="border-b border-border bg-surface-muted/40 text-xs uppercase text-text-muted">
+                      <tr>
+                        <th className="px-2 py-2 font-semibold">Purchased</th>
+                        <th className="px-2 py-2 font-semibold">Remaining</th>
+                        <th className="px-2 py-2 font-semibold">Paid</th>
+                        <th className="px-2 py-2 font-semibold">Supplier</th>
+                        {canAdjust && <th className="px-2 py-2 font-semibold"> </th>}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {openCounterBatches.map((b) => {
+                        const summary = batchSummaries[b.id];
+                        const expanded = expandedBatchId === b.id;
+                        return (
+                          <Fragment key={b.id}>
+                            <tr className="border-b border-border/60">
+                              <td className="px-2 py-2 tabular-nums">{b.purchaseDate}</td>
+                              <td className="px-2 py-2 font-semibold tabular-nums">
+                                {b.remainingQuantity}
+                                <span className="ml-1 font-normal text-text-muted">
+                                  / {b.initialQuantity} {selected?.unit}
+                                </span>
+                              </td>
+                              <td className="px-2 py-2 tabular-nums">
+                                {formatMoney(batchPurchaseTotal(b), currency)}
+                              </td>
+                              <td className="px-2 py-2 text-text-muted">
+                                {b.supplier || b.purchaseReference || '—'}
+                              </td>
+                              {canAdjust && (
+                                <td className="px-2 py-2 text-right">
+                                  <div className="flex flex-wrap items-center justify-end gap-1">
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => void toggleOpenBatchDetail(b.id)}
+                                    >
+                                      {expanded ? 'Hide' : 'Details'}
+                                    </Button>
+                                    {parseFloat(b.remainingQuantity) > 0 && (
+                                      <Button
+                                        variant="secondary"
+                                        size="sm"
+                                        onClick={() => openCloseOutBatch(b)}
+                                      >
+                                        Close cylinder
+                                      </Button>
+                                    )}
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => openAdjustBatch(b)}
+                                    >
+                                      Adjust
+                                    </Button>
+                                  </div>
+                                </td>
+                              )}
+                            </tr>
+                            {expanded && summary && (
+                              <tr className="border-b border-border/60 bg-surface-muted/40">
+                                <td colSpan={canAdjust ? 5 : 4} className="px-4 py-3">
+                                  <BatchProfitPanel
+                                    summary={summary}
+                                    currency={currency}
+                                    unit={selected?.unit ?? summary.unit}
+                                  />
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        open={modal === 'close-batch'}
+        onClose={() => {
+          setModal('batches');
+          setCloseOutTarget(null);
+          setCloseOutReason('');
+        }}
+        title={`Close cylinder — ${selected?.name ?? ''}`}
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setModal('batches');
+                setCloseOutTarget(null);
+                setCloseOutReason('');
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              loading={closeOutBatchMut.isPending}
+              disabled={closeOutReason.trim().length < 3}
+              onClick={() => closeOutBatchMut.mutate()}
+            >
+              Write off gas & close
+            </Button>
+          </>
+        }
+      >
+        {closeOutTarget && (
+          <div className="space-y-3">
+            <p className="text-sm text-text-muted">
+              Bought {closeOutTarget.purchaseDate} ·{' '}
+              <strong className="text-text">
+                {closeOutTarget.remainingQuantity} {selected?.unit}
+              </strong>{' '}
+              remaining will be written off as gas loss and this cylinder will be closed.
+            </p>
+            <div className="rounded-lg border border-amber-200 bg-amber-50/80 px-3 py-2 text-xs text-amber-950">
+              Cost impact:{' '}
+              {formatMoney(
+                (
+                  parseFloat(closeOutTarget.remainingQuantity) *
+                  parseFloat(closeOutTarget.costPerUnit)
+                ).toFixed(2),
+                currency,
+              )}{' '}
+              — included in batch profit and shop COGS when closed.
+            </div>
+            <Input
+              label="Reason"
+              value={closeOutReason}
+              onChange={(e) => setCloseOutReason(e.target.value)}
+              required
+              hint='e.g. "Cylinder empty — 0.45 kg remaining in line/hose loss"'
+            />
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        open={modal === 'adjust-batch'}
+        onClose={() => {
+          setModal('batches');
+          setAdjustTarget(null);
+        }}
+        title={`Adjust batch — ${selected?.name ?? ''}`}
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              type="button"
+              onClick={() => {
+                setModal('batches');
+                setAdjustTarget(null);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              form="inventory-adjust-batch-form"
+              loading={adjustBatchMut.isPending}
+            >
+              Save adjustment
+            </Button>
+          </>
+        }
+      >
+        {adjustTarget && (
+          <form
+            id="inventory-adjust-batch-form"
+            className="space-y-3"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const qty = parseFloat(adjustForm.remainingQuantity);
+              if (!Number.isFinite(qty) || qty < 0) return;
+              if (adjustForm.reason.trim().length < 3) {
+                toast.error('Enter a reason (at least 3 characters)');
+                return;
+              }
+              adjustBatchMut.mutate();
+            }}
+          >
+            <p className="text-sm text-text-muted">
+              Bought {adjustTarget.purchaseDate} · booked initial{' '}
+              {adjustTarget.initialQuantity} {selected?.unit}. Current remaining{' '}
+              <strong className="text-text">{adjustTarget.remainingQuantity}</strong>.
+            </p>
+            <div className="rounded-lg border border-brand-200 bg-brand-50/70 px-3 py-2 text-xs text-brand-950">
+              Use this after you physically weigh/measure. Set the real remaining qty — this is{' '}
+              <strong>not</strong> a sale and will not appear on customer receipts.
+            </div>
+            <Input
+              label={`Corrected remaining (${selected?.unit ?? 'units'})`}
+              type="number"
+              step="0.001"
+              value={adjustForm.remainingQuantity}
+              onChange={(e) =>
+                setAdjustForm({ ...adjustForm, remainingQuantity: e.target.value })
+              }
+              required
+            />
+            <Input
+              label="Reason"
+              value={adjustForm.reason}
+              onChange={(e) => setAdjustForm({ ...adjustForm, reason: e.target.value })}
+              required
+              hint='e.g. "Weighed cylinder — actual net 12.85 kg"'
+            />
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={adjustForm.markDamaged}
+                onChange={(e) =>
+                  setAdjustForm({ ...adjustForm, markDamaged: e.target.checked })
+                }
+              />
+              Mark batch as damaged
+            </label>
+          </form>
+        )}
       </Modal>
 
       {canEdit && (data?.meta.total ?? 0) > 0 && (
@@ -1362,6 +2653,38 @@ export function InventoryPage() {
         ) : (
           <p className="text-sm text-text-muted">Select a CSV file to preview import.</p>
         )}
+      </Modal>
+
+      <Modal
+        open={bulkAssignOpen}
+        onClose={() => setBulkAssignOpen(false)}
+        title="Assign products to shop part"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setBulkAssignOpen(false)}>
+              Cancel
+            </Button>
+            <Button loading={bulkAssignPart.isPending} onClick={() => bulkAssignPart.mutate()}>
+              Assign {selectedProductIds.size} product(s)
+            </Button>
+          </>
+        }
+      >
+        <p className="mb-3 text-sm text-text-muted">
+          Past sales for these products will also appear under the selected part.
+        </p>
+        <select
+          className="w-full rounded-xl border border-border px-3 py-2 text-sm"
+          value={bulkAssignPartId}
+          onChange={(e) => setBulkAssignPartId(e.target.value)}
+        >
+          <option value="">Unassigned (remove part)</option>
+          {(shopParts ?? []).map((part) => (
+            <option key={part.id} value={part.id}>
+              {part.name}
+            </option>
+          ))}
+        </select>
       </Modal>
 
       <ConfirmDialog

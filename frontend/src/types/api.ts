@@ -140,15 +140,65 @@ export interface Product {
   unit: string;
   costPrice: string | null;
   sellPrice: string;
+  batchSellPrice?: string | null;
   stockQuantity: string;
+  /** Total active batches (warehouse + open on counter). */
+  batchStockCount?: number | null;
+  /** Batches received but not yet opened for loose sales. */
+  batchWarehouseCount?: number | null;
+  /** Batches open on the counter for loose sales. */
+  batchOpenCount?: number | null;
   lowStockThreshold: string | null;
   taxRate: string;
   expiryDate: string | null;
   trackStock: boolean;
+  trackType?: 'SIMPLE' | 'BATCH';
+  dispensingLossPercent?: string;
   isActive: boolean;
   category: { id: string; name: string } | null;
+  part: { id: string; name: string } | null;
   brand: { id: string; name: string } | null;
   supplier: { id: string; name: string } | null;
+}
+
+export interface ProductBatch {
+  id: string;
+  productId: string;
+  purchaseDate: string;
+  supplier: string | null;
+  purchaseReference: string | null;
+  costPerUnit: string;
+  initialQuantity: string;
+  remainingQuantity: string;
+  status: 'WAREHOUSE' | 'OPEN' | 'CLOSED' | 'DAMAGED';
+  notes: string | null;
+  closedAt: string | null;
+  gasLossQuantity: string | null;
+  gasLossCost: string | null;
+  createdAt: string;
+  updatedAt: string;
+  product?: { id: string; name: string; unit: string };
+}
+
+export interface BatchSummary {
+  batchId: string;
+  status: 'WAREHOUSE' | 'OPEN' | 'CLOSED' | 'DAMAGED';
+  unit: string;
+  productName: string;
+  purchaseCost: string;
+  revenue: string;
+  cogsSold: string;
+  gasLossQuantity: string;
+  gasLossCost: string;
+  netProfit: string;
+  saleCount: number;
+  avgLossPerCharge: string | null;
+  effectiveLossPercent: string;
+  isFinal: boolean;
+  remainingQuantity: string;
+  initialQuantity: string;
+  costPerUnit: string;
+  closedAt: string | null;
 }
 
 export interface Brand {
@@ -337,6 +387,31 @@ export interface Category {
   name: string;
   sortOrder: number;
   isActive: boolean;
+}
+
+export interface ShopPart {
+  id: string;
+  name: string;
+  sortOrder: number;
+  isActive: boolean;
+}
+
+export interface ShopPartSummaryRow {
+  partId: string | null;
+  name: string;
+  revenue: string;
+  cost: string;
+  grossProfit: string;
+  taxTotal: string;
+  purchaseTotal: string;
+  transactionCount: number;
+}
+
+export interface ShopPartsSummaryReport {
+  from: string;
+  to: string;
+  combined: ShopPartSummaryRow;
+  parts: ShopPartSummaryRow[];
 }
 
 export interface Customer {

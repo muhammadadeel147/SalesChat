@@ -75,6 +75,12 @@ const navSections: NavSection[] = [
         icon: IconGrid,
         feature: FEATURES.INVENTORY_CATEGORIES,
       },
+      {
+        to: '/pos/shop-parts',
+        label: 'Shop Parts',
+        icon: IconTag,
+        feature: FEATURES.INVENTORY_SHOP_PARTS,
+      },
       { to: '/pos/brands', label: 'Brands', icon: IconBrand, feature: FEATURES.INVENTORY_BRANDS },
       {
         to: '/pos/suppliers',

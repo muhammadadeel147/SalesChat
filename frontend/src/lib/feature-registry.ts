@@ -64,6 +64,12 @@ export const FEATURE_REGISTRY: FeatureDefinition[] = [
     description: 'Add/edit/organize product categories',
   },
   {
+    key: FEATURES.INVENTORY_SHOP_PARTS,
+    module: 'inventory',
+    label: 'Shop Parts',
+    description: 'Divide one shop into parts with separate sales and profit tracking',
+  },
+  {
     key: FEATURES.INVENTORY_STOCK_ADJUST,
     module: 'inventory',
     label: 'Stock Adjustments',
@@ -195,6 +201,7 @@ const STANDARD_FEATURES: FeatureKey[] = [
   FEATURES.BILLING_DISCOUNT,
   FEATURES.BILLING_DISCOUNT_UNLIMITED,
   FEATURES.INVENTORY_CATEGORIES,
+  FEATURES.INVENTORY_SHOP_PARTS,
   FEATURES.INVENTORY_BRANDS,
   FEATURES.INVENTORY_SUPPLIERS,
   FEATURES.INVENTORY_PRODUCT_IMAGES,

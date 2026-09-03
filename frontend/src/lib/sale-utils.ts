@@ -16,6 +16,8 @@ export interface SaleTotals {
   grandTotal: number;
 }
 
+export type BatchSaleMode = 'LOOSE' | 'WHOLE';
+
 export function calcLineTax(
   unitPrice: number,
   quantity: number,
@@ -50,16 +52,89 @@ export function calcSaleTotals(
 
 export function getStockStatus(product: Product): 'healthy' | 'low' | 'out' | 'untracked' {
   if (!product.trackStock) return 'untracked';
-  const qty = parseFloat(product.stockQuantity);
+  const qty =
+    product.trackType === 'BATCH'
+      ? (product.batchStockCount ?? 0)
+      : parseFloat(product.stockQuantity);
   const threshold = product.lowStockThreshold ? parseFloat(product.lowStockThreshold) : 0;
   if (qty <= 0) return 'out';
   if (threshold > 0 && qty <= threshold) return 'low';
   return 'healthy';
 }
 
+export function formatProductStock(product: Product): string {
+  if (!product.trackStock) return '—';
+  if (product.trackType === 'BATCH') {
+    const warehouse = product.batchWarehouseCount ?? 0;
+    const open = product.batchOpenCount ?? 0;
+    const total = product.batchStockCount ?? warehouse + open;
+    if (total <= 0) return '0 batches';
+    const parts: string[] = [];
+    if (warehouse > 0) parts.push(`${warehouse} in stock`);
+    if (open > 0) parts.push(`${open} open`);
+    return parts.length > 0 ? parts.join(' · ') : `${total} batches`;
+  }
+  return product.stockQuantity;
+}
+
+export function formatBatchProductPrice(
+  product: Product,
+  currency: string,
+  formatMoneyFn: (amount: string | number, currency: string) => string,
+): { perUnit: string; wholeBatch: string } {
+  const unit = product.unit || 'unit';
+  return {
+    perUnit: `${formatMoneyFn(product.sellPrice, currency)}/${unit}`,
+    wholeBatch: formatMoneyFn(product.batchSellPrice ?? product.sellPrice, currency),
+  };
+}
+
 export function canAddToCart(product: Product, addQty = 1, currentQty = 0): boolean {
   if (!product.trackStock) return true;
   return parseFloat(product.stockQuantity) >= currentQty + addQty;
+}
+
+/** Round billed qty to 2dp (matches server). */
+export function roundSoldQty(qty: number): number {
+  return Math.round(qty * 100) / 100;
+}
+
+export function qtyFromAmount(amount: number, pricePerUnit: number): number {
+  if (!Number.isFinite(amount) || !Number.isFinite(pricePerUnit) || pricePerUnit <= 0) return 0;
+  return roundSoldQty(amount / pricePerUnit);
+}
+
+export function amountFromQty(qty: number, pricePerUnit: number): number {
+  if (!Number.isFinite(qty) || !Number.isFinite(pricePerUnit)) return 0;
+  return Math.round(qty * pricePerUnit * 100) / 100;
+}
+
+export function isBatchProduct(product: Product): boolean {
+  return product.trackType === 'BATCH' && product.trackStock;
+}
+
+export function needsBatchSaleModal(product: Product | null | undefined): boolean {
+  return Boolean(product && isBatchProduct(product));
+}
+
+/** Loose / partial sales — per unit (e.g. PKR per meter). */
+export function looseUnitPrice(product: Product): number {
+  return parseFloat(product.sellPrice);
+}
+
+/** Whole warehouse batch — fixed total price (e.g. PKR 3000 for the full coil). */
+export function wholeBatchPrice(product: Product): number {
+  return parseFloat(product.batchSellPrice ?? product.sellPrice);
+}
+
+/** Qty on the bill: 1 for whole batch, else loose meters/kg. */
+export function billedQuantity(saleMode: BatchSaleMode, looseQty: number): number {
+  return saleMode === 'WHOLE' ? 1 : roundSoldQty(looseQty);
+}
+
+/** @deprecated Use looseUnitPrice or wholeBatchPrice */
+export function batchUnitPrice(product: Product, saleMode: BatchSaleMode): number {
+  return saleMode === 'WHOLE' ? wholeBatchPrice(product) : looseUnitPrice(product);
 }
 
 /** Instant client-side filter for name / SKU / barcode. */

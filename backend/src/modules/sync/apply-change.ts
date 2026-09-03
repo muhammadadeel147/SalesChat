@@ -30,6 +30,7 @@ const VERSIONED_TABLES = new Set<string>([
 const LWW_TABLES = new Set<string>([
   SYNC_TABLES.products,
   SYNC_TABLES.categories,
+  SYNC_TABLES.shopParts,
   SYNC_TABLES.customers,
   SYNC_TABLES.discountRules,
   SYNC_TABLES.branches,
@@ -62,6 +63,11 @@ async function findExisting(
       });
     case SYNC_TABLES.categories:
       return tx.category.findUnique({
+        where: { id: recordId },
+        select: { version: true, updatedAt: true },
+      });
+    case SYNC_TABLES.shopParts:
+      return tx.shopPart.findUnique({
         where: { id: recordId },
         select: { version: true, updatedAt: true },
       });
@@ -129,6 +135,9 @@ async function insertRow(
     case SYNC_TABLES.categories:
       await tx.category.create({ data: data as never });
       break;
+    case SYNC_TABLES.shopParts:
+      await tx.shopPart.create({ data: data as never });
+      break;
     case SYNC_TABLES.customers:
       await tx.customer.create({ data: { ...(data as object), balance: 0 } as never });
       break;
@@ -173,6 +182,9 @@ async function updateRow(
       break;
     case SYNC_TABLES.categories:
       await tx.category.update({ where: { id: recordId }, data: data as never });
+      break;
+    case SYNC_TABLES.shopParts:
+      await tx.shopPart.update({ where: { id: recordId }, data: data as never });
       break;
     case SYNC_TABLES.customers:
       await tx.customer.update({ where: { id: recordId }, data: data as never });

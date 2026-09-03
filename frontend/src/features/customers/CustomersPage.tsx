@@ -58,7 +58,7 @@ export function CustomersPage() {
   const debouncedSearch = useDebouncedValue(search, 300);
   const [page, setPage] = useState(1);
   const [sortByBalance, setSortByBalance] = useState(true);
-  const { range, setRange, customFrom, setCustomFrom, customTo, setCustomTo, dates } =
+  const { range, setRange, customFrom, setCustomFrom, customTo, setCustomTo, selectedMonth, setSelectedMonth, dates } =
     useDateRangeFilter('month');
   const [selected, setSelected] = useState<Customer | null>(null);
   const [modal, setModal] = useState<'create' | 'edit' | 'payment' | null>(null);
@@ -281,6 +281,8 @@ export function CustomersPage() {
           customTo={customTo}
           onCustomFromChange={setCustomFrom}
           onCustomToChange={setCustomTo}
+          selectedMonth={selectedMonth}
+          onSelectedMonthChange={setSelectedMonth}
           from={dates.from}
           to={dates.to}
         />

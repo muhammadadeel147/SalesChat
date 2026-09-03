@@ -96,28 +96,69 @@ export async function getDashboardSummary(
         low_stock_threshold: { toString(): string } | string | number;
       }>
     >`
-      SELECT id, name, stock_quantity, low_stock_threshold
-      FROM products
-      WHERE tenant_id = ${tenantId}::uuid
-        AND deleted_at IS NULL
-        AND is_active = true
-        AND track_stock = true
-        AND low_stock_threshold IS NOT NULL
-        AND stock_quantity > 0
-        AND stock_quantity <= low_stock_threshold
-      ORDER BY stock_quantity ASC, name ASC
+      SELECT p.id, p.name,
+        CASE
+          WHEN p.track_type = 'BATCH' THEN COALESCE(bc.cnt, 0)::numeric
+          ELSE p.stock_quantity
+        END AS stock_quantity,
+        p.low_stock_threshold
+      FROM products p
+      LEFT JOIN (
+        SELECT product_id, COUNT(*)::int AS cnt
+        FROM batches
+        WHERE tenant_id = ${tenantId}::uuid
+          AND status IN ('WAREHOUSE', 'OPEN')
+          AND remaining_quantity > 0
+        GROUP BY product_id
+      ) bc ON bc.product_id = p.id
+      WHERE p.tenant_id = ${tenantId}::uuid
+        AND p.deleted_at IS NULL
+        AND p.is_active = true
+        AND p.track_stock = true
+        AND p.low_stock_threshold IS NOT NULL
+        AND (
+          CASE
+            WHEN p.track_type = 'BATCH' THEN COALESCE(bc.cnt, 0)
+            ELSE p.stock_quantity
+          END
+        ) > 0
+        AND (
+          CASE
+            WHEN p.track_type = 'BATCH' THEN COALESCE(bc.cnt, 0)
+            ELSE p.stock_quantity
+          END
+        ) <= p.low_stock_threshold
+      ORDER BY stock_quantity ASC, p.name ASC
       LIMIT 5
     `,
     prisma.$queryRaw<Array<{ count: bigint | number }>>`
       SELECT COUNT(*)::int AS count
-      FROM products
-      WHERE tenant_id = ${tenantId}::uuid
-        AND deleted_at IS NULL
-        AND is_active = true
-        AND track_stock = true
-        AND low_stock_threshold IS NOT NULL
-        AND stock_quantity > 0
-        AND stock_quantity <= low_stock_threshold
+      FROM products p
+      LEFT JOIN (
+        SELECT product_id, COUNT(*)::int AS cnt
+        FROM batches
+        WHERE tenant_id = ${tenantId}::uuid
+          AND status IN ('WAREHOUSE', 'OPEN')
+          AND remaining_quantity > 0
+        GROUP BY product_id
+      ) bc ON bc.product_id = p.id
+      WHERE p.tenant_id = ${tenantId}::uuid
+        AND p.deleted_at IS NULL
+        AND p.is_active = true
+        AND p.track_stock = true
+        AND p.low_stock_threshold IS NOT NULL
+        AND (
+          CASE
+            WHEN p.track_type = 'BATCH' THEN COALESCE(bc.cnt, 0)
+            ELSE p.stock_quantity
+          END
+        ) > 0
+        AND (
+          CASE
+            WHEN p.track_type = 'BATCH' THEN COALESCE(bc.cnt, 0)
+            ELSE p.stock_quantity
+          END
+        ) <= p.low_stock_threshold
     `,
     prisma.$queryRaw<Array<{ value: { toString(): string } | string | number | null }>>`
       SELECT COALESCE(SUM(COALESCE(cost_price, 0) * stock_quantity), 0) AS value
@@ -446,7 +487,11 @@ export async function getSalesSummary(
   const [sales, returns] = await Promise.all([
     prisma.sale.findMany({
       where: saleWhere,
-      include: { items: { include: { product: { select: { costPrice: true } } } } },
+      include: {
+        items: {
+          include: { product: { select: { costPrice: true } } },
+        },
+      },
     }),
     prisma.saleReturn.findMany({
       where: {
@@ -458,6 +503,36 @@ export async function getSalesSummary(
     }),
   ]);
 
+  const gasLossAgg = await prisma.batch.aggregate({
+    where: {
+      tenantId,
+      closedAt: { gte: start, lte: end },
+      gasLossCost: { not: null },
+    },
+    _sum: { gasLossCost: true },
+  });
+  const gasLossCostTotal = gasLossAgg._sum.gasLossCost ?? new Decimal(0);
+
+  const returnSaleItemIds = [...new Set(returns.flatMap((r) => r.items.map((i) => i.saleItemId)))];
+  const returnSaleItems =
+    returnSaleItemIds.length > 0
+      ? await prisma.saleItem.findMany({
+          where: { id: { in: returnSaleItemIds }, tenantId },
+          select: {
+            id: true,
+            unitCostAtSale: true,
+            product: { select: { costPrice: true } },
+          },
+        })
+      : [];
+  const returnCostBySaleItem = new Map(
+    returnSaleItems.map((si) => [
+      si.id,
+      si.unitCostAtSale ?? si.product.costPrice ?? null,
+    ]),
+  );
+
+  // Fallback for older returns / missing sale-item rows
   const returnProductIds = [...new Set(returns.flatMap((r) => r.items.map((i) => i.productId)))];
   const returnProducts =
     returnProductIds.length > 0
@@ -483,9 +558,9 @@ export async function getSalesSummary(
     discounts = discounts.plus(sale.discountTotal);
 
     for (const item of sale.items) {
-      const itemCost = item.product.costPrice
-        ? item.product.costPrice.times(item.quantity)
-        : new Decimal(0);
+      const unitCost = item.unitCostAtSale ?? item.product.costPrice;
+      const qtyForCost = item.quantityDeducted ?? item.quantity;
+      const itemCost = unitCost ? unitCost.times(qtyForCost) : new Decimal(0);
       cost = cost.plus(itemCost);
 
       const existing = productMap.get(item.productId) ?? {
@@ -502,8 +577,9 @@ export async function getSalesSummary(
   for (const ret of returns) {
     returnsAmount = returnsAmount.plus(ret.totalAmount);
     for (const ri of ret.items) {
-      const costPrice = returnCostMap.get(ri.productId);
-      const itemCost = costPrice ? costPrice.times(ri.quantity) : new Decimal(0);
+      const unitCost =
+        returnCostBySaleItem.get(ri.saleItemId) ?? returnCostMap.get(ri.productId) ?? null;
+      const itemCost = unitCost ? unitCost.times(ri.quantity) : new Decimal(0);
       returnedCost = returnedCost.plus(itemCost);
 
       const existing = productMap.get(ri.productId);
@@ -515,7 +591,7 @@ export async function getSalesSummary(
   }
 
   const revenue = Decimal.max(0, grossRevenue.minus(returnsAmount));
-  const netCost = Decimal.max(0, cost.minus(returnedCost));
+  const netCost = Decimal.max(0, cost.minus(returnedCost).plus(gasLossCostTotal));
   const grossProfit = revenue.minus(netCost).minus(tax);
 
   const topProducts = [...productMap.entries()]
@@ -543,6 +619,257 @@ export async function getSalesSummary(
     discountTotal: discounts.toFixed(2),
     averageTicket: sales.length > 0 ? revenue.div(sales.length).toFixed(2) : '0.00',
     topProducts,
+  };
+}
+
+const UNASSIGNED_PART_KEY = '__unassigned__';
+
+function shopPartKey(partId: string | null | undefined): string {
+  return partId ?? UNASSIGNED_PART_KEY;
+}
+
+type ShopPartAgg = {
+  revenue: Decimal;
+  cost: Decimal;
+  tax: Decimal;
+  returnsAmount: Decimal;
+  returnedCost: Decimal;
+  gasLossCost: Decimal;
+  purchaseTotal: Decimal;
+  saleIds: Set<string>;
+};
+
+function emptyShopPartAgg(): ShopPartAgg {
+  return {
+    revenue: new Decimal(0),
+    cost: new Decimal(0),
+    tax: new Decimal(0),
+    returnsAmount: new Decimal(0),
+    returnedCost: new Decimal(0),
+    gasLossCost: new Decimal(0),
+    purchaseTotal: new Decimal(0),
+    saleIds: new Set<string>(),
+  };
+}
+
+function finalizeShopPartRow(
+  key: string,
+  row: ShopPartAgg,
+  nameByKey: Map<string, string>,
+) {
+  const netRevenue = Decimal.max(0, row.revenue.minus(row.returnsAmount));
+  const netCost = Decimal.max(0, row.cost.minus(row.returnedCost).plus(row.gasLossCost));
+  const grossProfit = netRevenue.minus(netCost).minus(row.tax);
+  return {
+    partId: key === UNASSIGNED_PART_KEY ? null : key,
+    name: nameByKey.get(key) ?? 'Unknown',
+    revenue: netRevenue.toFixed(2),
+    cost: netCost.toFixed(2),
+    grossProfit: grossProfit.toFixed(2),
+    taxTotal: row.tax.toFixed(2),
+    purchaseTotal: row.purchaseTotal.toFixed(2),
+    transactionCount: row.saleIds.size,
+  };
+}
+
+/** Per-part and combined sales/profit/purchase for shop divisions. */
+export async function getShopPartsSummary(
+  tenantId: string,
+  from?: string,
+  to?: string,
+  branchId?: string,
+  filterPartId?: string | null,
+) {
+  const { start, end } = resolvePkDateRange(from, to);
+
+  const [parts, sales, returns, gasLossBatches, stockIns, batchPurchases] = await Promise.all([
+    prisma.shopPart.findMany({
+      where: { tenantId, deletedAt: null },
+      select: { id: true, name: true, sortOrder: true },
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+    }),
+    prisma.sale.findMany({
+      where: {
+        tenantId,
+        status: 'COMPLETED',
+        createdAt: { gte: start, lte: end },
+        ...(branchId ? { branchId } : {}),
+      },
+      include: {
+        items: {
+          select: {
+            saleId: true,
+            partId: true,
+            lineTotal: true,
+            taxAmount: true,
+            quantity: true,
+            quantityDeducted: true,
+            unitCostAtSale: true,
+            product: { select: { costPrice: true } },
+          },
+        },
+      },
+    }),
+    prisma.saleReturn.findMany({
+      where: {
+        tenantId,
+        createdAt: { gte: start, lte: end },
+        ...(branchId ? { sale: { branchId } } : {}),
+      },
+      include: { items: true },
+    }),
+    prisma.batch.findMany({
+      where: {
+        tenantId,
+        closedAt: { gte: start, lte: end },
+        gasLossCost: { not: null },
+      },
+      select: {
+        gasLossCost: true,
+        product: { select: { partId: true } },
+      },
+    }),
+    prisma.stockMovement.findMany({
+      where: {
+        tenantId,
+        movementType: 'STOCK_IN',
+        batchId: null,
+        createdAt: { gte: start, lte: end },
+      },
+      select: {
+        quantityDelta: true,
+        product: { select: { partId: true, costPrice: true } },
+      },
+    }),
+    prisma.batch.findMany({
+      where: {
+        tenantId,
+        createdAt: { gte: start, lte: end },
+      },
+      select: {
+        costPerUnit: true,
+        initialQuantity: true,
+        product: { select: { partId: true } },
+      },
+    }),
+  ]);
+
+  const returnSaleItemIds = [...new Set(returns.flatMap((r) => r.items.map((i) => i.saleItemId)))];
+  const returnSaleItems =
+    returnSaleItemIds.length > 0
+      ? await prisma.saleItem.findMany({
+          where: { id: { in: returnSaleItemIds }, tenantId },
+          select: {
+            id: true,
+            partId: true,
+            unitCostAtSale: true,
+            product: { select: { costPrice: true } },
+          },
+        })
+      : [];
+  const returnItemById = new Map(returnSaleItems.map((si) => [si.id, si]));
+
+  const aggs = new Map<string, ShopPartAgg>();
+  const ensureAgg = (key: string): ShopPartAgg => {
+    const existing = aggs.get(key);
+    if (existing) return existing;
+    const created = emptyShopPartAgg();
+    aggs.set(key, created);
+    return created;
+  };
+
+  for (const sale of sales) {
+    for (const item of sale.items) {
+      const key = shopPartKey(item.partId);
+      const row = ensureAgg(key);
+      row.revenue = row.revenue.plus(item.lineTotal);
+      row.tax = row.tax.plus(item.taxAmount);
+      const unitCost = item.unitCostAtSale ?? item.product.costPrice;
+      const qtyForCost = item.quantityDeducted ?? item.quantity;
+      const itemCost = unitCost ? unitCost.times(qtyForCost) : new Decimal(0);
+      row.cost = row.cost.plus(itemCost);
+      row.saleIds.add(sale.id);
+    }
+  }
+
+  for (const ret of returns) {
+    for (const ri of ret.items) {
+      const si = returnItemById.get(ri.saleItemId);
+      const key = shopPartKey(si?.partId);
+      const row = ensureAgg(key);
+      row.returnsAmount = row.returnsAmount.plus(ri.refundAmount);
+      const unitCost = si?.unitCostAtSale ?? si?.product.costPrice ?? null;
+      const itemCost = unitCost ? unitCost.times(ri.quantity) : new Decimal(0);
+      row.returnedCost = row.returnedCost.plus(itemCost);
+    }
+  }
+
+  for (const batch of gasLossBatches) {
+    const key = shopPartKey(batch.product.partId);
+    const row = ensureAgg(key);
+    row.gasLossCost = row.gasLossCost.plus(batch.gasLossCost ?? 0);
+  }
+
+  for (const movement of stockIns) {
+    const key = shopPartKey(movement.product.partId);
+    const row = ensureAgg(key);
+    const cost = movement.product.costPrice ?? new Decimal(0);
+    row.purchaseTotal = row.purchaseTotal.plus(cost.times(movement.quantityDelta.abs()));
+  }
+
+  for (const batch of batchPurchases) {
+    const key = shopPartKey(batch.product.partId);
+    const row = ensureAgg(key);
+    row.purchaseTotal = row.purchaseTotal.plus(batch.costPerUnit.times(batch.initialQuantity));
+  }
+
+  const nameByKey = new Map<string, string>([
+    [UNASSIGNED_PART_KEY, 'Unassigned'],
+    ...parts.map((p) => [p.id, p.name] as const),
+  ]);
+
+  const combinedAgg = emptyShopPartAgg();
+  for (const row of aggs.values()) {
+    combinedAgg.revenue = combinedAgg.revenue.plus(row.revenue);
+    combinedAgg.cost = combinedAgg.cost.plus(row.cost);
+    combinedAgg.tax = combinedAgg.tax.plus(row.tax);
+    combinedAgg.returnsAmount = combinedAgg.returnsAmount.plus(row.returnsAmount);
+    combinedAgg.returnedCost = combinedAgg.returnedCost.plus(row.returnedCost);
+    combinedAgg.gasLossCost = combinedAgg.gasLossCost.plus(row.gasLossCost);
+    combinedAgg.purchaseTotal = combinedAgg.purchaseTotal.plus(row.purchaseTotal);
+    for (const saleId of row.saleIds) combinedAgg.saleIds.add(saleId);
+  }
+
+  const partRows = parts.map((part) =>
+    finalizeShopPartRow(part.id, ensureAgg(part.id), nameByKey),
+  );
+  if (aggs.has(UNASSIGNED_PART_KEY)) {
+    partRows.push(finalizeShopPartRow(UNASSIGNED_PART_KEY, ensureAgg(UNASSIGNED_PART_KEY), nameByKey));
+  }
+
+  const combined = finalizeShopPartRow('combined', combinedAgg, new Map([['combined', 'Combined']]));
+
+  const filteredParts =
+    filterPartId === UNASSIGNED_PART_KEY || filterPartId === 'none'
+      ? partRows.filter((p) => p.partId == null)
+      : filterPartId
+        ? partRows.filter((p) => p.partId === filterPartId)
+        : partRows;
+
+  return {
+    from: start.toISOString().slice(0, 10),
+    to: end.toISOString().slice(0, 10),
+    combined: {
+      partId: null,
+      name: 'Combined',
+      revenue: combined.revenue,
+      cost: combined.cost,
+      grossProfit: combined.grossProfit,
+      taxTotal: combined.taxTotal,
+      purchaseTotal: combined.purchaseTotal,
+      transactionCount: combined.transactionCount,
+    },
+    parts: filteredParts,
   };
 }
 

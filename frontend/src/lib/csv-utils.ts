@@ -108,6 +108,7 @@ export const INVENTORY_CSV_HEADERS = [
   'cost_price',
   'unit',
   'category',
+  'shop_part',
   'brand',
   'supplier',
   'stock_quantity',
@@ -133,6 +134,7 @@ export const INVENTORY_CSV_FIELD_META: Array<{
   { field: 'barcode', label: 'Barcode' },
   { field: 'unit', label: 'Unit' },
   { field: 'category', label: 'Category' },
+  { field: 'shop_part', label: 'Shop part' },
   { field: 'brand', label: 'Brand' },
   { field: 'supplier', label: 'Supplier' },
   { field: 'stock_quantity', label: 'Stock quantity' },
@@ -197,6 +199,16 @@ const HEADER_ALIASES: Record<InventoryCsvField, string[]> = {
   ],
   unit: ['unit', 'uom', 'unit_of_measure', 'unitofmeasure'],
   category: ['category', 'product_category', 'productcategory', 'category_name', 'categoryname'],
+  shop_part: [
+    'shop_part',
+    'shoppart',
+    'part',
+    'part_name',
+    'partname',
+    'shop_section',
+    'section',
+    'hissa',
+  ],
   brand: ['brand', 'brand_name', 'brandname', 'make'],
   supplier: ['supplier', 'supplier_name', 'suppliername', 'vendor', 'vendor_name'],
   stock_quantity: [
@@ -276,6 +288,7 @@ export interface InventoryCsvRow {
   barcode?: string | null;
   unit?: string;
   categoryName?: string | null;
+  partName?: string | null;
   brandName?: string | null;
   supplierName?: string | null;
   stockQuantity?: number;
@@ -426,6 +439,7 @@ export function csvRowsToImportProducts(
       barcode: (col('barcode', cells) || null)?.slice(0, 100) ?? null,
       unit: (col('unit', cells) || 'pcs').slice(0, 50),
       categoryName: (col('category', cells) || null)?.slice(0, 255) ?? null,
+      partName: (col('shop_part', cells) || null)?.slice(0, 255) ?? null,
       brandName: (col('brand', cells) || null)?.slice(0, 255) ?? null,
       supplierName: (col('supplier', cells) || null)?.slice(0, 255) ?? null,
       stockQuantity: stockQty ?? undefined,

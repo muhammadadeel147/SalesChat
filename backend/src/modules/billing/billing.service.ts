@@ -10,13 +10,19 @@ import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '.
 import { prisma } from '../core/prisma.js';
 import { toDecimal } from '../core/money.js';
 import { compactText, findIdsByCompactSearch } from '../core/text-match.js';
-import { calculateSaleTotals } from './billing.totals.js';
+import { calculateSaleLine, calculateSaleTotals } from './billing.totals.js';
 import { nextSaleNumber } from './sale-sequence.js';
 import { recordCreditSale } from '../customers/ledger.service.js';
 import { recordDiscountUsages } from './discounts.service.js';
 import { getSettings } from '../settings/settings.service.js';
 import { lockCustomerForUpdate } from '../customers/customer-lock.js';
 import { decrementProductStock, incrementProductStock } from '../inventory/product-stock.js';
+import {
+  allocateLooseBatchSale,
+  allocateWholeBatchSale,
+  applyBatchAllocations,
+  roundQtySold,
+} from '../inventory/batch-sale.js';
 import { SYNC_TABLES, syncInsert, syncOutboxEnabled, syncUpdate } from '../sync/sync-payload.js';
 
 export const saleItemSchema = z.object({
@@ -26,6 +32,10 @@ export const saleItemSchema = z.object({
   discountAmount: z.number().nonnegative().optional(),
   /** Display name override (e.g. miscellaneous / open amount description). */
   productName: z.string().min(1).max(255).optional(),
+  /** Preferred batch for track_type=BATCH products. */
+  batchId: z.string().uuid().optional().nullable(),
+  /** WHOLE = sell entire warehouse batch; LOOSE = partial from counter batch. */
+  saleMode: z.enum(['LOOSE', 'WHOLE']).optional(),
 });
 
 export const createSaleSchema = z.object({
@@ -43,6 +53,8 @@ export const createSaleSchema = z.object({
   amountReceived: z.number().nonnegative().optional(),
   /** Credit from a prior return/exchange — reduces cash due on this sale. */
   exchangeCreditAmount: z.number().nonnegative().optional(),
+  /** When true, split a batch line across multiple open batches if needed. */
+  allowSplitBatches: z.boolean().optional(),
 });
 
 export type CreateSaleInput = z.infer<typeof createSaleSchema>;
@@ -88,6 +100,7 @@ export async function createSale(
   if (products.length !== productIds.length) {
     throw new NotFoundError('One or more products not found');
   }
+
   if (needsCustomer && !customerRow) {
     throw new NotFoundError('Customer not found');
   }
@@ -97,9 +110,17 @@ export async function createSale(
   const totals = calculateSaleTotals(
     input.items.map((item) => {
       const product = productMap.get(item.productId)!;
+      const isBatch = String(product.trackType) === 'BATCH';
+      const saleMode = item.saleMode ?? (isBatch ? 'LOOSE' : undefined);
+      const defaultUnitPrice =
+        isBatch && saleMode === 'WHOLE'
+          ? product.batchSellPrice ?? product.sellPrice
+          : product.sellPrice;
+      const billedQty =
+        isBatch && saleMode === 'WHOLE' ? toDecimal(1) : roundQtySold(item.quantity);
       return {
-        unitPrice: item.unitPrice ?? product.sellPrice,
-        quantity: item.quantity,
+        unitPrice: item.unitPrice ?? defaultUnitPrice,
+        quantity: billedQty,
         discountAmount: item.discountAmount ?? 0,
         taxRatePercent: product.taxRate,
       };
@@ -179,15 +200,30 @@ export async function createSale(
     const product = productMap.get(item.productId)!;
     const calc = totals.lines[index]!;
     const customName = item.productName?.trim();
+    const isBatch = String(product.trackType) === 'BATCH';
+    const saleMode = item.saleMode ?? (isBatch ? 'LOOSE' : undefined);
+    const quantitySold =
+      isBatch && saleMode === 'WHOLE' ? toDecimal(1) : roundQtySold(item.quantity);
+    const defaultUnitPrice =
+      isBatch && saleMode === 'WHOLE'
+        ? product.batchSellPrice ?? product.sellPrice
+        : product.sellPrice;
     return {
       productId: product.id,
       productName: customName || product.name,
-      unitPrice: toDecimal(item.unitPrice ?? product.sellPrice),
-      quantity: toDecimal(item.quantity),
+      unitPrice: toDecimal(item.unitPrice ?? defaultUnitPrice),
+      quantity: quantitySold,
       discountAmount: calc.discountAmount,
       taxAmount: calc.taxAmount,
       lineTotal: calc.lineTotal,
       trackStock: product.trackStock,
+      trackType: product.trackType,
+      costPrice: product.costPrice,
+      unit: product.unit,
+      preferredBatchId: item.batchId ?? null,
+      saleMode,
+      inputDiscount: toDecimal(item.discountAmount ?? 0),
+      taxRate: product.taxRate,
     };
   });
 
@@ -262,6 +298,139 @@ export async function createSale(
     const exchangeNote = exchangeParts.length > 0 ? exchangeParts.join(' · ') : null;
     const saleNotes = [input.notes?.trim(), exchangeNote].filter(Boolean).join(' · ') || null;
 
+    const closeTolRow = await tx.businessSettings.findUnique({
+      where: { tenantId },
+      select: { batchCloseTolerance: true },
+    });
+    const closeTolerance = closeTolRow?.batchCloseTolerance ?? toDecimal(0.1);
+    const allowSplit = input.allowSplitBatches === true;
+
+    type SaleItemCreate = {
+      tenantId: string;
+      productId: string;
+      productName: string;
+      unitPrice: ReturnType<typeof toDecimal>;
+      quantity: ReturnType<typeof toDecimal>;
+      quantityDeducted: ReturnType<typeof toDecimal>;
+      unitCostAtSale: ReturnType<typeof toDecimal> | null;
+      partId: string | null;
+      batchId: string | null;
+      discountAmount: ReturnType<typeof toDecimal>;
+      taxAmount: ReturnType<typeof toDecimal>;
+      lineTotal: ReturnType<typeof toDecimal>;
+    };
+
+    const saleItemCreates: SaleItemCreate[] = [];
+    const pendingBatchApplies: Array<{
+      productId: string;
+      productName: string;
+      unit: string;
+      allocations: Awaited<ReturnType<typeof allocateLooseBatchSale>>;
+    }> = [];
+    const pendingSimple: Array<{
+      productId: string;
+      productName: string;
+      quantity: ReturnType<typeof toDecimal>;
+    }> = [];
+
+    for (const li of lineItems) {
+      const product = productMap.get(li.productId)!;
+      const isBatch = String(li.trackType) === 'BATCH';
+      if (li.preferredBatchId && !isBatch) {
+        throw new ValidationError(
+          `${li.productName} is not a batch-tracked product; remove batch selection or set track type to Batch.`,
+        );
+      }
+      if (isBatch) {
+        if (!li.trackStock) {
+          throw new ValidationError(
+            `${li.productName} is batch-tracked but stock tracking is off. Enable Track stock to sell from batches.`,
+          );
+        }
+        const saleMode = li.saleMode ?? 'LOOSE';
+        if (saleMode !== 'LOOSE' && saleMode !== 'WHOLE') {
+          throw new ValidationError(`${li.productName}: choose loose or whole batch sale mode`);
+        }
+        const allocations =
+          saleMode === 'WHOLE'
+            ? await allocateWholeBatchSale(tx, {
+                tenantId,
+                product,
+                preferredBatchId: li.preferredBatchId,
+                closeTolerance,
+              })
+            : await allocateLooseBatchSale(tx, {
+                tenantId,
+                product,
+                quantitySold: li.quantity,
+                preferredBatchId: li.preferredBatchId,
+                allowSplit,
+                closeTolerance,
+              });
+        pendingBatchApplies.push({
+          productId: li.productId,
+          productName: li.productName,
+          unit: li.unit,
+          allocations,
+        });
+
+        const totalSold = allocations.reduce((s, a) => s.plus(a.quantitySold), toDecimal(0));
+        let discountLeft = li.inputDiscount;
+        for (let i = 0; i < allocations.length; i++) {
+          const alloc = allocations[i]!;
+          const isLast = i === allocations.length - 1;
+          const disc = isLast
+            ? discountLeft
+            : totalSold.gt(0)
+              ? li.inputDiscount.times(alloc.quantitySold).div(totalSold).toDecimalPlaces(2)
+              : toDecimal(0);
+          discountLeft = discountLeft.minus(disc);
+          const calc = calculateSaleLine({
+            unitPrice: li.unitPrice,
+            quantity: alloc.quantitySold,
+            discountAmount: disc,
+            taxRatePercent: li.taxRate,
+          });
+          saleItemCreates.push({
+            tenantId,
+            productId: li.productId,
+            productName: li.productName,
+            unitPrice: li.unitPrice,
+            quantity: alloc.quantitySold,
+            quantityDeducted: alloc.quantityDeducted,
+            unitCostAtSale: alloc.unitCostAtSale,
+            partId: product.partId ?? null,
+            batchId: alloc.batchId,
+            discountAmount: calc.discountAmount,
+            taxAmount: calc.taxAmount,
+            lineTotal: calc.lineTotal,
+          });
+        }
+      } else {
+        saleItemCreates.push({
+          tenantId,
+          productId: li.productId,
+          productName: li.productName,
+          unitPrice: li.unitPrice,
+          quantity: li.quantity,
+          quantityDeducted: li.quantity,
+          unitCostAtSale: li.costPrice,
+          partId: product.partId ?? null,
+          batchId: null,
+          discountAmount: li.discountAmount,
+          taxAmount: li.taxAmount,
+          lineTotal: li.lineTotal,
+        });
+        if (li.trackStock) {
+          pendingSimple.push({
+            productId: li.productId,
+            productName: li.productName,
+            quantity: li.quantity,
+          });
+        }
+      }
+    }
+
     let created = await tx.sale.create({
       data: {
         id: saleId,
@@ -282,16 +451,7 @@ export async function createSale(
         amountReceived,
         changeGiven,
         items: {
-          create: lineItems.map((li) => ({
-            tenantId,
-            productId: li.productId,
-            productName: li.productName,
-            unitPrice: li.unitPrice,
-            quantity: li.quantity,
-            discountAmount: li.discountAmount,
-            taxAmount: li.taxAmount,
-            lineTotal: li.lineTotal,
-          })),
+          create: saleItemCreates,
         },
         ...(nestPayments && nestedPaymentData.length > 0
           ? { payments: { create: nestedPaymentData } }
@@ -367,28 +527,29 @@ export async function createSale(
     const movementRows: Array<{
       tenantId: string;
       productId: string;
-      movementType: 'SALE';
+      batchId?: string | null;
+      movementType: 'SALE' | 'ADJUSTMENT';
       quantityDelta: ReturnType<typeof toDecimal>;
       quantityAfter: ReturnType<typeof toDecimal>;
       referenceType: string;
       referenceId: string;
+      notes?: string | null;
       recordedById: string;
       branchId?: string;
     }> = [];
 
-    for (const li of lineItems) {
-      if (!li.trackStock) continue;
+    for (const simple of pendingSimple) {
       const quantityAfter = await decrementProductStock(tx, {
         tenantId,
-        productId: li.productId,
-        quantity: li.quantity,
-        productName: li.productName,
+        productId: simple.productId,
+        quantity: simple.quantity,
+        productName: simple.productName,
       });
       movementRows.push({
         tenantId,
-        productId: li.productId,
+        productId: simple.productId,
         movementType: 'SALE',
-        quantityDelta: li.quantity.negated(),
+        quantityDelta: simple.quantity.negated(),
         quantityAfter,
         referenceType: 'sale',
         referenceId: created.id,
@@ -397,20 +558,42 @@ export async function createSale(
       });
     }
 
+    for (const pending of pendingBatchApplies) {
+      const applied = await applyBatchAllocations(tx, {
+        tenantId,
+        productId: pending.productId,
+        productName: pending.productName,
+        unit: pending.unit,
+        allocations: pending.allocations,
+        saleId: created.id,
+        recordedById: cashierId,
+        branchId: options?.branchId,
+      });
+      for (const m of applied.movements) {
+        movementRows.push({
+          ...m,
+          quantityAfter: applied.productStockAfter,
+        });
+      }
+    }
+
     if (movementRows.length > 0) {
       await tx.stockMovement.createMany({ data: movementRows });
     }
 
     if (syncOn && movementRows.length > 0) {
       const movements = await tx.stockMovement.findMany({
-        where: { tenantId, referenceId: created.id, movementType: 'SALE' },
+        where: { tenantId, referenceId: created.id },
       });
       for (const movement of movements) {
         await syncInsert(tx, SYNC_TABLES.stockMovements, movement);
       }
-      for (const li of lineItems) {
-        if (!li.trackStock) continue;
-        const productRow = await tx.product.findUnique({ where: { id: li.productId } });
+      const touchedProductIds = new Set([
+        ...pendingSimple.map((p) => p.productId),
+        ...pendingBatchApplies.map((p) => p.productId),
+      ]);
+      for (const productId of touchedProductIds) {
+        const productRow = await tx.product.findUnique({ where: { id: productId } });
         if (productRow) await syncUpdate(tx, SYNC_TABLES.products, productRow);
       }
     }

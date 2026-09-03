@@ -12,6 +12,7 @@ import {
   getDashboardSummary,
   getSalesSummary,
   getSalesTrend,
+  getShopPartsSummary,
   getStaffPerformanceReport,
   getStockMovementReport,
   getUdhaarAgingReport,
@@ -74,6 +75,18 @@ export function createReportRouter(): Router {
       const q = req.query as { from?: string; to?: string; branchId?: string };
       const branchId = await optionalBranchId(req, tenantId, q.branchId);
       return getSalesSummary(tenantId, q.from, q.to, branchId);
+    }),
+  );
+
+  router.get(
+    '/reports/shop-parts-summary',
+    authenticate,
+    requireFeature(FEATURES.REPORTS_VIEW),
+    jsonHandler(async (req) => {
+      const tenantId = resolveTenantId(req);
+      const q = req.query as { from?: string; to?: string; branchId?: string; partId?: string };
+      const branchId = await optionalBranchId(req, tenantId, q.branchId);
+      return getShopPartsSummary(tenantId, q.from, q.to, branchId, q.partId);
     }),
   );
 

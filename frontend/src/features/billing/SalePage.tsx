@@ -23,10 +23,10 @@ import { useAuth } from '@/lib/auth';
 import { formatMoney } from '@/lib/format';
 import { printSaleReceipt } from '@/lib/print-receipt';
 import { resolveReceiptAfterSale } from '@/lib/receipt-prefs';
-import { calcSaleTotals, canAddToCart, getStockStatus } from '@/lib/sale-utils';
+import { calcSaleTotals, canAddToCart, getStockStatus, isBatchProduct, needsBatchSaleModal, looseUnitPrice, wholeBatchPrice, billedQuantity, amountFromQty, qtyFromAmount, roundSoldQty, type BatchSaleMode } from '@/lib/sale-utils';
 import { useDebouncedValue } from '@/lib/use-debounced-value';
 import { productMatchesSearch, customerMatchesSearch } from '@/lib/search-match';
-import type { Customer, HeldCart, Product, SaleDetail } from '@/types/api';
+import type { Customer, HeldCart, Product, ProductBatch, SaleDetail } from '@/types/api';
 import { QuickPickCustomizeModal } from '@/features/billing/QuickPickCustomizeModal';
 
 const SALE_SEARCH_LIMIT = 40;
@@ -40,6 +40,12 @@ interface CartLine {
   discountAmount: number;
   /** Receipt label override for open/misc amounts. */
   customName?: string;
+  /** Selected batch for BATCH products. */
+  batchId?: string;
+  batchLabel?: string;
+  saleMode?: BatchSaleMode;
+  /** Stock qty removed on whole-batch sale (all meters/kg on the batch). */
+  batchStockDeduct?: number;
 }
 
 type PaymentMode = 'CASH' | 'CREDIT' | 'SPLIT';
@@ -111,6 +117,20 @@ export function SalePage() {
   const [deleteHeldTarget, setDeleteHeldTarget] = useState<HeldCart | null>(null);
   const [exchangeBanner, setExchangeBanner] = useState<ExchangeSaleLocationState | null>(null);
   const [mobileCartOpen, setMobileCartOpen] = useState(false);
+  const [batchEntryProduct, setBatchEntryProduct] = useState<Product | null>(null);
+  const [batchEntryEditKey, setBatchEntryEditKey] = useState<string | null>(null);
+  const [batchOptions, setBatchOptions] = useState<ProductBatch[]>([]);
+  const [batchOptionsLoading, setBatchOptionsLoading] = useState(false);
+  const [batchForm, setBatchForm] = useState({
+    saleMode: 'LOOSE' as BatchSaleMode,
+    batchId: '',
+    qty: '',
+    amount: '',
+  });
+  const [allowSplitBatches, setAllowSplitBatches] = useState(false);
+  const [splitConfirmOpen, setSplitConfirmOpen] = useState(false);
+  const [splitConfirmMessage, setSplitConfirmMessage] = useState('');
+  const pendingSaleBodyRef = useRef<Record<string, unknown> | null>(null);
 
   const canDiscount = hasFeature(user, FEATURES.BILLING_DISCOUNT);
   const canDiscountUnlimited = hasFeature(user, FEATURES.BILLING_DISCOUNT_UNLIMITED);
@@ -260,8 +280,81 @@ export function SalePage() {
     return null;
   }, [customer, paymentMode, totals.grandTotal, creditAmount, currency]);
 
+  const loadBatchOptions = useCallback(
+    async (product: Product, saleMode: BatchSaleMode) => {
+      setBatchOptionsLoading(true);
+      try {
+        const status = saleMode === 'WHOLE' ? 'WAREHOUSE' : 'OPEN';
+        const rows = await api.products.listBatches(product.id, status);
+        setBatchOptions(rows);
+        return rows;
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Could not load batches');
+        setBatchOptions([]);
+        return [];
+      } finally {
+        setBatchOptionsLoading(false);
+      }
+    },
+    [toast],
+  );
+
+  const openBatchEntry = useCallback(
+    async (product: Product, existing?: CartLine) => {
+      const saleMode = existing?.saleMode ?? 'LOOSE';
+      setBatchEntryProduct(product);
+      setBatchEntryEditKey(existing?.key ?? null);
+      const price =
+        saleMode === 'WHOLE' ? wholeBatchPrice(product) : looseUnitPrice(product);
+      const qty = existing?.quantity ?? 0;
+      setBatchForm({
+        saleMode,
+        batchId: existing?.batchId ?? '',
+        qty: saleMode === 'WHOLE' ? '1' : qty > 0 ? String(qty) : '',
+        amount:
+          saleMode === 'WHOLE'
+            ? String(price)
+            : qty > 0
+              ? String(amountFromQty(qty, price))
+              : '',
+      });
+      const rows = await loadBatchOptions(product, saleMode);
+      if (!existing?.batchId && rows.length > 0) {
+        const first = rows[0]!;
+        if (saleMode === 'WHOLE') {
+          setBatchForm((prev) => ({
+            ...prev,
+            batchId: first.id,
+            qty: '1',
+            amount: String(price),
+          }));
+        } else {
+          setBatchForm((prev) => ({ ...prev, batchId: first.id }));
+        }
+      }
+    },
+    [loadBatchOptions],
+  );
+
   const addToCart = useCallback(
-    (product: Product, opts?: { quantity?: number; unitPrice?: number; customName?: string }) => {
+    (
+      product: Product,
+      opts?: {
+        quantity?: number;
+        unitPrice?: number;
+        customName?: string;
+        batchId?: string;
+        batchLabel?: string;
+        saleMode?: BatchSaleMode;
+        batchStockDeduct?: number;
+        skipBatchModal?: boolean;
+      },
+    ) => {
+      if (needsBatchSaleModal(product) && !opts?.skipBatchModal && !opts?.customName) {
+        void openBatchEntry(product);
+        return;
+      }
+
       const qty = opts?.quantity ?? 1;
       const unitPrice = opts?.unitPrice ?? parseFloat(product.sellPrice);
       const customName = opts?.customName?.trim();
@@ -270,10 +363,17 @@ export function SalePage() {
           l.product.id === product.id &&
           (l.customName ?? '') === (customName ?? '') &&
           l.unitPrice === unitPrice &&
+          (l.batchId ?? '') === (opts?.batchId ?? '') &&
+          (l.saleMode ?? 'LOOSE') === (opts?.saleMode ?? 'LOOSE') &&
           !customName,
       );
       const currentQty = existing?.quantity ?? 0;
-      if (!canAddToCart(product, qty, currentQty)) {
+      if (isBatchProduct(product) && opts?.skipBatchModal) {
+        if (!canAddToCart(product, qty, 0)) {
+          setError(`${product.name} is out of stock`);
+          return;
+        }
+      } else if (!needsBatchSaleModal(product) && !canAddToCart(product, qty, currentQty)) {
         setError(`${product.name} is out of stock`);
         return;
       }
@@ -302,7 +402,25 @@ export function SalePage() {
             },
           ];
         }
-        const ex = prev.find((l) => l.product.id === product.id && !l.customName);
+        if (needsBatchSaleModal(product)) {
+          const saleMode = opts?.saleMode ?? 'LOOSE';
+          const soldQty = billedQuantity(saleMode, qty);
+          return [
+            ...prev,
+            {
+              key: `batch-${product.id}-${opts?.batchId ?? 'none'}-${saleMode}-${Date.now()}`,
+              product,
+              quantity: soldQty,
+              unitPrice,
+              discountAmount: 0,
+              batchId: opts?.batchId,
+              batchLabel: opts?.batchLabel,
+              saleMode,
+              batchStockDeduct: opts?.batchStockDeduct,
+            },
+          ];
+        }
+        const ex = prev.find((l) => l.product.id === product.id && !l.customName && !l.batchId);
         if (ex) {
           return prev.map((l) => (l.key === ex.key ? { ...l, quantity: l.quantity + qty } : l));
         }
@@ -323,8 +441,98 @@ export function SalePage() {
       setShowDropdown(false);
       safeFocus(searchRef.current);
     },
-    [cart, toast],
+    [cart, toast, openBatchEntry],
   );
+
+  const commitBatchEntry = () => {
+    if (!batchEntryProduct) return;
+    const saleMode = batchForm.saleMode;
+    const selectedBatch = batchOptions.find((b) => b.id === batchForm.batchId);
+    const price =
+      saleMode === 'WHOLE'
+        ? wholeBatchPrice(batchEntryProduct)
+        : looseUnitPrice(batchEntryProduct);
+    const stockDeduct =
+      saleMode === 'WHOLE' && selectedBatch
+        ? parseFloat(selectedBatch.remainingQuantity)
+        : undefined;
+    const qty =
+      saleMode === 'WHOLE'
+        ? 1
+        : roundSoldQty(parseFloat(batchForm.qty));
+    if (!Number.isFinite(price) || price < 0) {
+      setError('Invalid price');
+      return;
+    }
+    if (saleMode === 'WHOLE') {
+      if (!selectedBatch || stockDeduct! <= 0) {
+        setError('Select a warehouse batch with stock');
+        return;
+      }
+    } else if (!Number.isFinite(qty) || qty <= 0) {
+      setError('Enter quantity or amount');
+      return;
+    }
+    if (batchOptions.length > 0 && !batchForm.batchId) {
+      setError('Select a batch to draw from');
+      return;
+    }
+    if (
+      saleMode === 'LOOSE' &&
+      selectedBatch &&
+      qty > parseFloat(selectedBatch.remainingQuantity) + 0.0001 &&
+      batchOptions.length === 1
+    ) {
+      setError(
+        `Not enough in this batch (need ${qty.toFixed(3)} ${batchEntryProduct.unit}, have ${selectedBatch.remainingQuantity})`,
+      );
+      return;
+    }
+    if (saleMode === 'LOOSE' && !canAddToCart(batchEntryProduct, qty, 0) && !batchEntryEditKey) {
+      const totalOpen = batchOptions.reduce((s, b) => s + parseFloat(b.remainingQuantity), 0);
+      if (qty > totalOpen + 0.0001) {
+        setError(`${batchEntryProduct.name} is out of stock`);
+        return;
+      }
+    }
+
+    const batchLabel = selectedBatch
+      ? saleMode === 'WHOLE'
+        ? `Whole batch · ${selectedBatch.remainingQuantity} ${batchEntryProduct.unit} · ${formatMoney(price, currency)}`
+        : `${selectedBatch.remainingQuantity} ${batchEntryProduct.unit} left · ${selectedBatch.purchaseDate}`
+      : undefined;
+
+    if (batchEntryEditKey) {
+      setCart((prev) =>
+        prev.map((l) =>
+          l.key === batchEntryEditKey
+            ? {
+                ...l,
+                quantity: qty,
+                unitPrice: price,
+                batchId: batchForm.batchId || undefined,
+                batchLabel,
+                saleMode,
+                batchStockDeduct: stockDeduct,
+              }
+            : l,
+        ),
+      );
+    } else {
+      addToCart(batchEntryProduct, {
+        quantity: qty,
+        unitPrice: price,
+        batchId: batchForm.batchId || undefined,
+        batchLabel,
+        saleMode,
+        batchStockDeduct: stockDeduct,
+        skipBatchModal: true,
+      });
+    }
+    setBatchEntryProduct(null);
+    setBatchEntryEditKey(null);
+    setError('');
+  };
 
   const applyDiscountRule = useCallback(
     (ruleId: string) => {
@@ -498,20 +706,28 @@ export function SalePage() {
     setConfirmCancel(true);
   };
 
-  const buildSalePayload = () => {
+  const buildSalePayload = (opts?: { allowSplit?: boolean }) => {
     const body: Record<string, unknown> = {
       customerId: customer?.id,
       paymentMethod: paymentMode === 'SPLIT' ? 'SPLIT' : paymentMode,
       items: cart.map((l) => ({
         productId: l.product.id,
-        quantity: l.quantity,
+        quantity:
+          l.saleMode === 'WHOLE'
+            ? 1
+            : isBatchProduct(l.product)
+              ? roundSoldQty(l.quantity)
+              : l.quantity,
         unitPrice: l.unitPrice,
         discountAmount: l.discountAmount,
         ...(l.customName ? { productName: l.customName } : {}),
+        ...(l.batchId ? { batchId: l.batchId } : {}),
+        ...(l.saleMode ? { saleMode: l.saleMode } : {}),
       })),
       billDiscountAmount: billDiscount,
       appliedDiscounts: appliedDiscounts.length > 0 ? appliedDiscounts : undefined,
       notes: notes || undefined,
+      allowSplitBatches: opts?.allowSplit ?? allowSplitBatches,
       printReceipt: resolveReceiptAfterSale({
         userId: user?.id,
         shopShow: settings?.showReceiptAfterSale,
@@ -560,6 +776,8 @@ export function SalePage() {
       } catch (err) {
         // Re-sync stock so UI matches server after a failed checkout.
         void queryClient.invalidateQueries({ queryKey: ['products'] });
+        void queryClient.invalidateQueries({ queryKey: ['batches'] });
+        void queryClient.invalidateQueries({ queryKey: ['inventory-summary'] });
         throw err;
       }
     },
@@ -580,7 +798,11 @@ export function SalePage() {
         const qtyById = new Map<string, number>();
         for (const line of cart) {
           if (!line.product.trackStock) continue;
-          qtyById.set(line.product.id, (qtyById.get(line.product.id) ?? 0) + line.quantity);
+          const deducted =
+            line.saleMode === 'WHOLE' && line.batchStockDeduct != null
+              ? line.batchStockDeduct
+              : line.quantity;
+          qtyById.set(line.product.id, (qtyById.get(line.product.id) ?? 0) + deducted);
         }
         if (qtyById.size === 0) return prev;
         return {
@@ -592,6 +814,39 @@ export function SalePage() {
             return { ...p, stockQuantity: String(next) };
           }),
         };
+      });
+      setAllowSplitBatches(false);
+      pendingSaleBodyRef.current = null;
+
+      // Optimistically reduce open-batch remaining so Inventory updates immediately.
+      queryClient.setQueriesData<ProductBatch[]>({ queryKey: ['batches'] }, (prev) => {
+        if (!Array.isArray(prev)) return prev;
+        const deductByBatch = new Map<string, number>();
+        for (const line of cart) {
+          if (!needsBatchSaleModal(line.product) || !line.batchId) continue;
+          if (line.saleMode === 'WHOLE') {
+            deductByBatch.set(line.batchId, Number.POSITIVE_INFINITY);
+            continue;
+          }
+          const deducted = line.quantity;
+          deductByBatch.set(line.batchId, (deductByBatch.get(line.batchId) ?? 0) + deducted);
+        }
+        if (deductByBatch.size === 0) return prev;
+        return prev
+          .map((b) => {
+            const d = deductByBatch.get(b.id);
+            if (d == null) return b;
+            if (d === Number.POSITIVE_INFINITY) {
+              return { ...b, remainingQuantity: '0.000', status: 'CLOSED' as const };
+            }
+            const next = Math.max(0, parseFloat(b.remainingQuantity) - d);
+            return {
+              ...b,
+              remainingQuantity: next.toFixed(3),
+              status: next <= 0.1 ? ('CLOSED' as const) : b.status,
+            };
+          })
+          .filter((b) => b.status === 'OPEN' || !deductByBatch.has(b.id));
       });
 
       window.setTimeout(() => {
@@ -652,11 +907,18 @@ export function SalePage() {
           void queryClient.invalidateQueries({ queryKey: ['sales'] });
           void queryClient.invalidateQueries({ queryKey: ['customers'] });
           void queryClient.invalidateQueries({ queryKey: ['products'] });
+          void queryClient.invalidateQueries({ queryKey: ['batches'] });
           void queryClient.invalidateQueries({ queryKey: ['inventory-summary'] });
         }, 0);
       }, 350);
     },
     onError: (err) => {
+      if (err instanceof ApiError && err.code === 'BATCH_SPLIT_REQUIRED') {
+        pendingSaleBodyRef.current = buildSalePayload({ allowSplit: true });
+        setSplitConfirmMessage(err.message);
+        setSplitConfirmOpen(true);
+        return;
+      }
       const message =
         err instanceof ApiError
           ? err.message
@@ -667,6 +929,8 @@ export function SalePage() {
       toast.error(message);
       // Keep checkout open; re-enable Authorize via isPending clearing.
       void queryClient.invalidateQueries({ queryKey: ['products'] });
+      void queryClient.invalidateQueries({ queryKey: ['batches'] });
+      void queryClient.invalidateQueries({ queryKey: ['inventory-summary'] });
     },
   });
 
@@ -948,63 +1212,138 @@ export function SalePage() {
       </div>
     ) : (
       <div className="space-y-2">
-        {cart.map((line) => (
-          <div
-            key={line.key}
-            className="rounded-xl border border-border/80 bg-surface-muted/60 p-2.5"
-          >
-            <div className="flex items-start justify-between gap-2">
-              <p className="line-clamp-2 text-sm font-medium leading-tight">
-                {line.customName ?? line.product.name}
+        {cart.map((line) => {
+          const batch = needsBatchSaleModal(line.product);
+          const wholeBatch = line.saleMode === 'WHOLE';
+          return (
+            <div
+              key={line.key}
+              className="rounded-xl border border-border/80 bg-surface-muted/60 p-2.5"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <p className="line-clamp-2 text-sm font-medium leading-tight">
+                  {line.customName ?? line.product.name}
+                </p>
+                <button
+                  type="button"
+                  className="shrink-0 text-[10px] text-danger"
+                  onClick={() => setCart((c) => c.filter((l) => l.key !== line.key))}
+                >
+                  ✕
+                </button>
+              </div>
+              <p className="mt-0.5 text-[10px] text-text-muted">
+                {wholeBatch ? (
+                  <>
+                    {formatMoney(line.unitPrice, currency)} whole batch
+                    {line.batchStockDeduct
+                      ? ` · ${line.batchStockDeduct} ${line.product.unit} stock`
+                      : ''}
+                  </>
+                ) : (
+                  <>
+                    {formatMoney(line.unitPrice, currency)} / {line.product.unit} × {line.quantity}
+                  </>
+                )}
+                {line.customName ? ' · Other' : ''}
+                {batch && line.batchLabel ? ` · ${line.batchLabel}` : ''}
+                {!wholeBatch && batch ? ' · Loose' : ''}
               </p>
-              <button
-                type="button"
-                className="shrink-0 text-[10px] text-danger"
-                onClick={() => setCart((c) => c.filter((l) => l.key !== line.key))}
-              >
-                ✕
-              </button>
+              {batch ? (
+                <div className="mt-2 space-y-1.5">
+                  {wholeBatch ? (
+                    <p className="text-[10px] text-text-muted">
+                      Fixed whole-batch price — all stock on this batch is removed
+                    </p>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <label className="block text-[10px] text-text-muted">
+                        Qty ({line.product.unit})
+                        <input
+                          type="number"
+                          step="0.01"
+                          className="mt-0.5 w-full rounded-md border border-border bg-white px-2 py-1.5 text-sm font-semibold"
+                          value={line.quantity}
+                          onChange={(e) => {
+                            const q = roundSoldQty(parseFloat(e.target.value) || 0);
+                            setCart((c) =>
+                              c.map((l) => (l.key === line.key ? { ...l, quantity: Math.max(0.01, q) } : l)),
+                            );
+                          }}
+                        />
+                      </label>
+                      <label className="block text-[10px] text-text-muted">
+                        Amount ({currency})
+                        <input
+                          type="number"
+                          step="0.01"
+                          className="mt-0.5 w-full rounded-md border border-border bg-white px-2 py-1.5 text-sm font-semibold"
+                          value={amountFromQty(line.quantity, line.unitPrice)}
+                          onChange={(e) => {
+                            const amt = parseFloat(e.target.value) || 0;
+                            const q = qtyFromAmount(amt, line.unitPrice);
+                            setCart((c) =>
+                              c.map((l) =>
+                                l.key === line.key ? { ...l, quantity: Math.max(0.01, q) } : l,
+                              ),
+                            );
+                          }}
+                        />
+                      </label>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      className="text-[10px] font-semibold text-brand-700"
+                      onClick={() => void openBatchEntry(line.product, line)}
+                    >
+                      Change batch
+                    </button>
+                    <span className="text-sm font-bold text-brand-700">
+                      {formatMoney(line.quantity * line.unitPrice - line.discountAmount, currency)}
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-2 flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    className="flex h-9 w-9 items-center justify-center rounded-md border border-border bg-white text-sm font-bold"
+                    onClick={() =>
+                      setCart((c) =>
+                        c.map((l) =>
+                          l.key === line.key ? { ...l, quantity: Math.max(1, l.quantity - 1) } : l,
+                        ),
+                      )
+                    }
+                  >
+                    −
+                  </button>
+                  <span className="min-w-[24px] text-center text-sm font-semibold">
+                    {line.quantity}
+                  </span>
+                  <button
+                    type="button"
+                    className="flex h-9 w-9 items-center justify-center rounded-md border border-border bg-white text-sm font-bold"
+                    onClick={() => {
+                      if (canAddToCart(line.product, 1, line.quantity)) {
+                        setCart((c) =>
+                          c.map((l) => (l.key === line.key ? { ...l, quantity: l.quantity + 1 } : l)),
+                        );
+                      } else setError('Insufficient stock');
+                    }}
+                  >
+                    +
+                  </button>
+                  <span className="ml-auto text-sm font-bold text-brand-700">
+                    {formatMoney(line.quantity * line.unitPrice - line.discountAmount, currency)}
+                  </span>
+                </div>
+              )}
             </div>
-            <p className="mt-0.5 text-[10px] text-text-muted">
-              {formatMoney(line.unitPrice, currency)} × {line.quantity}
-              {line.customName ? ' · Other' : ''}
-            </p>
-            <div className="mt-2 flex items-center gap-1.5">
-              <button
-                type="button"
-                className="flex h-9 w-9 items-center justify-center rounded-md border border-border bg-white text-sm font-bold"
-                onClick={() =>
-                  setCart((c) =>
-                    c.map((l) =>
-                      l.key === line.key ? { ...l, quantity: Math.max(1, l.quantity - 1) } : l,
-                    ),
-                  )
-                }
-              >
-                −
-              </button>
-              <span className="min-w-[24px] text-center text-sm font-semibold">
-                {line.quantity}
-              </span>
-              <button
-                type="button"
-                className="flex h-9 w-9 items-center justify-center rounded-md border border-border bg-white text-sm font-bold"
-                onClick={() => {
-                  if (canAddToCart(line.product, 1, line.quantity)) {
-                    setCart((c) =>
-                      c.map((l) => (l.key === line.key ? { ...l, quantity: l.quantity + 1 } : l)),
-                    );
-                  } else setError('Insufficient stock');
-                }}
-              >
-                +
-              </button>
-              <span className="ml-auto text-sm font-bold text-brand-700">
-                {formatMoney(line.quantity * line.unitPrice - line.discountAmount, currency)}
-              </span>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     );
 
@@ -2001,6 +2340,262 @@ export function SalePage() {
           })}
         </div>
       </Modal>
+
+      <Modal
+        open={batchEntryProduct != null}
+        onClose={() => {
+          setBatchEntryProduct(null);
+          setBatchEntryEditKey(null);
+        }}
+        title={
+          batchEntryEditKey
+            ? 'Edit batch sale'
+            : `Sell — ${batchEntryProduct?.name ?? ''}`
+        }
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              type="button"
+              onClick={() => {
+                setBatchEntryProduct(null);
+                setBatchEntryEditKey(null);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button type="button" onClick={commitBatchEntry} disabled={batchOptionsLoading}>
+              {batchEntryEditKey ? 'Update' : 'Add to cart'}
+            </Button>
+          </>
+        }
+      >
+        {batchEntryProduct && (
+          <div className="space-y-3">
+            <div className="flex gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant={batchForm.saleMode === 'LOOSE' ? 'primary' : 'secondary'}
+                onClick={() => {
+                  if (batchForm.saleMode === 'LOOSE') return;
+                  setBatchForm({ saleMode: 'LOOSE', batchId: '', qty: '', amount: '' });
+                  void loadBatchOptions(batchEntryProduct, 'LOOSE');
+                }}
+              >
+                Loose
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant={batchForm.saleMode === 'WHOLE' ? 'primary' : 'secondary'}
+                onClick={() => {
+                  if (batchForm.saleMode === 'WHOLE') return;
+                  setBatchForm({ saleMode: 'WHOLE', batchId: '', qty: '', amount: '' });
+                  void loadBatchOptions(batchEntryProduct, 'WHOLE').then((rows) => {
+                    if (rows.length === 0) return;
+                    const first = rows[0]!;
+                    const price = wholeBatchPrice(batchEntryProduct);
+                    setBatchForm((prev) => ({
+                      ...prev,
+                      batchId: first.id,
+                      qty: '1',
+                      amount: String(price),
+                    }));
+                  });
+                }}
+              >
+                Whole batch
+              </Button>
+            </div>
+            <p className="text-sm text-text-muted">
+              {batchForm.saleMode === 'WHOLE'
+                ? 'Sell the full warehouse batch at one fixed price (set in Inventory).'
+                : `Sell partial quantity at ${formatMoney(looseUnitPrice(batchEntryProduct), currency)} per ${batchEntryProduct.unit}.`}
+            </p>
+            {batchOptionsLoading ? (
+              <p className="text-sm text-text-muted">
+                Loading {batchForm.saleMode === 'WHOLE' ? 'warehouse' : 'open'} batches…
+              </p>
+            ) : batchOptions.length === 0 ? (
+              <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">
+                {batchForm.saleMode === 'WHOLE'
+                  ? 'No warehouse batches. Receive stock for this product in Inventory first.'
+                  : 'No open counter batches. Open a warehouse batch for loose sales in Inventory first.'}
+              </p>
+            ) : (
+              <>
+                <Select
+                  label={batchForm.saleMode === 'WHOLE' ? 'Warehouse batch' : 'Counter batch'}
+                  value={batchForm.batchId}
+                  onChange={(e) => {
+                    const batchId = e.target.value;
+                    const selected = batchOptions.find((b) => b.id === batchId);
+                    if (batchForm.saleMode === 'WHOLE' && selected) {
+                      const price = wholeBatchPrice(batchEntryProduct);
+                      setBatchForm({
+                        ...batchForm,
+                        batchId,
+                        qty: '1',
+                        amount: String(price),
+                      });
+                      return;
+                    }
+                    setBatchForm({ ...batchForm, batchId });
+                  }}
+                  options={batchOptions.map((b) => ({
+                    value: b.id,
+                    label: `${b.remainingQuantity} ${batchEntryProduct.unit} left · bought ${b.purchaseDate}${b.supplier ? ` · ${b.supplier}` : ''}`,
+                  }))}
+                />
+                {(() => {
+                  const selectedBatch = batchOptions.find((b) => b.id === batchForm.batchId);
+                  if (!selectedBatch) return null;
+                  const rem = parseFloat(selectedBatch.remainingQuantity) || 0;
+                  return (
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-brand-200 bg-brand-50/60 px-3 py-2 text-sm">
+                      <p className="text-brand-900">
+                        <strong className="tabular-nums">{selectedBatch.remainingQuantity}</strong>{' '}
+                        {batchEntryProduct.unit} left on this batch
+                        {selectedBatch.purchaseDate ? (
+                          <span className="text-brand-800/80"> · bought {selectedBatch.purchaseDate}</span>
+                        ) : null}
+                      </p>
+                      {batchForm.saleMode === 'LOOSE' && (
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          disabled={rem <= 0}
+                          onClick={() => {
+                            const price = looseUnitPrice(batchEntryProduct);
+                            const qty = roundSoldQty(rem);
+                            if (qty <= 0) return;
+                            setBatchForm({
+                              ...batchForm,
+                              qty: String(qty),
+                              amount: price > 0 ? String(amountFromQty(qty, price)) : '',
+                            });
+                          }}
+                        >
+                          Use remaining
+                        </Button>
+                      )}
+                    </div>
+                  );
+                })()}
+              </>
+            )}
+            <div className="rounded-lg border border-border bg-surface-muted/50 px-3 py-2 text-sm">
+              <p>
+                {batchForm.saleMode === 'WHOLE' ? (
+                  <>
+                    Whole batch price:{' '}
+                    <strong className="tabular-nums">
+                      {formatMoney(wholeBatchPrice(batchEntryProduct), currency)}
+                    </strong>
+                  </>
+                ) : (
+                  <>
+                    Retail rate:{' '}
+                    <strong className="tabular-nums">
+                      {formatMoney(looseUnitPrice(batchEntryProduct), currency)}
+                    </strong>
+                    {` / ${batchEntryProduct.unit}`}
+                  </>
+                )}
+              </p>
+            </div>
+            {batchForm.saleMode === 'LOOSE' && (
+              <div className="grid grid-cols-2 gap-3">
+                <Input
+                  label={`Quantity (${batchEntryProduct.unit})`}
+                  type="number"
+                  step="0.01"
+                  value={batchForm.qty}
+                  onChange={(e) => {
+                    const qty = e.target.value;
+                    const q = parseFloat(qty) || 0;
+                    const price = looseUnitPrice(batchEntryProduct);
+                    setBatchForm({
+                      ...batchForm,
+                      qty,
+                      amount: q > 0 && price > 0 ? String(amountFromQty(q, price)) : '',
+                    });
+                  }}
+                />
+                <Input
+                  label={`Amount (${currency})`}
+                  type="number"
+                  step="0.01"
+                  value={batchForm.amount}
+                  onChange={(e) => {
+                    const amount = e.target.value;
+                    const amt = parseFloat(amount) || 0;
+                    const price = looseUnitPrice(batchEntryProduct);
+                    setBatchForm({
+                      ...batchForm,
+                      amount,
+                      qty: amt > 0 && price > 0 ? String(qtyFromAmount(amt, price)) : '',
+                    });
+                  }}
+                />
+              </div>
+            )}
+            {batchForm.saleMode === 'LOOSE' &&
+              (() => {
+                const qty = parseFloat(batchForm.qty) || 0;
+                const price = looseUnitPrice(batchEntryProduct);
+                if (qty <= 0) return null;
+                return (
+                  <div className="rounded-lg border border-border bg-surface-muted/50 px-3 py-2 text-xs text-text-muted">
+                    <p>
+                      Customer pays for <strong className="text-text">{roundSoldQty(qty)}</strong>{' '}
+                      {batchEntryProduct.unit} (
+                      {formatMoney(amountFromQty(roundSoldQty(qty), price), currency)}
+                      ). Stock deducts the same quantity.
+                    </p>
+                  </div>
+                );
+              })()}
+            {batchForm.saleMode === 'WHOLE' && batchForm.batchId && (
+              <div className="rounded-lg border border-border bg-surface-muted/50 px-3 py-2 text-xs text-text-muted">
+                <p>
+                  Customer pays{' '}
+                  <strong className="text-text">
+                    {formatMoney(wholeBatchPrice(batchEntryProduct), currency)}
+                  </strong>{' '}
+                  for the whole batch
+                  {(() => {
+                    const b = batchOptions.find((x) => x.id === batchForm.batchId);
+                    return b ? ` (${b.remainingQuantity} ${batchEntryProduct.unit} removed from stock)` : '';
+                  })()}
+                  .
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
+
+      <ConfirmDialog
+        open={splitConfirmOpen}
+        onClose={() => {
+          setSplitConfirmOpen(false);
+          pendingSaleBodyRef.current = null;
+        }}
+        onConfirm={() => {
+          setSplitConfirmOpen(false);
+          setAllowSplitBatches(true);
+          const body = pendingSaleBodyRef.current ?? buildSalePayload({ allowSplit: true });
+          pendingSaleBodyRef.current = null;
+          completeSale.mutate(body);
+        }}
+        title="Split across batches?"
+        message={splitConfirmMessage || 'This sale needs more than one open batch. Continue?'}
+        confirmLabel="Split and sell"
+        loading={completeSale.isPending}
+      />
 
       <ConfirmDialog
         open={confirmCancel}
